@@ -1,0 +1,41 @@
+# Production compose file, used by .github/workflows/deploy.yml.
+#
+# docker-compose.yml builds from source for local use. This file instead runs
+# the image the Deploy workflow pushes to GitHub Container Registry. The deploy
+# step sets CANVAS_AUDIO_IMAGE to the exact commit it just built; run by hand,
+# it falls back to :latest.
+#
+# DEPLOY_PATH on the server needs this file and a .env with the app settings
+# (see .env.example). The image is private, so pulling it by hand requires
+# `docker login ghcr.io` first. The container runs as uid 10001, so ./data and
+# ./output must be writable by that user:  sudo chown -R 10001:10001 data output
+services:
+  canvas-audio:
+    image: ${CANVAS_AUDIO_IMAGE:-ghcr.io/oleandrw/canvas-audio:latest}
+    container_name: canvas-audio
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      DATA_DIR: /data
+      OUTPUT_DIR: /output
+      # Set when the app is served over HTTPS so the session cookie gets Secure.
+      # HTTPS_ONLY: "1"
+    volumes:
+      - ./data:/data
+      - ./output:/output
+      # Prices ship inside the image. To correct them without a new deploy,
+      # put a pricing.toml next to this file and uncomment:
+      # - ./pricing.toml:/app/pricing.toml:ro
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4).status == 200 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

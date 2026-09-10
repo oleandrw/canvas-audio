@@ -1,12 +1,13 @@
-# Example deployment workflow — kept separate from CI on purpose.
+# Deployment workflow, kept separate from CI on purpose.
 #
-# It builds the image, pushes it to GitHub Container Registry, and (optionally)
-# tells a server to pull and restart. Nothing here contains credentials: every
-# value comes from GitHub Secrets.
+# Builds the image, pushes it to GitHub Container Registry, and (optionally)
+# has a server pull that exact image and restart. Nothing here contains
+# credentials: every value comes from GitHub Secrets or the built-in token.
 #
-# Required secrets for the optional deploy step:
+# The server restart runs only when the repository variable DEPLOY_ENABLED is
+# "true", and needs these secrets:
 #   DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY, DEPLOY_PATH
-# The registry push uses the built-in GITHUB_TOKEN.
+# DEPLOY_PATH must contain docker-compose.prod.yml and a .env (see README).
 
 name: Deploy
 
@@ -63,20 +64,37 @@ jobs:
     name: Restart the server
     runs-on: ubuntu-latest
     needs: build-and-push
-    # Only runs when the deployment secrets are configured, so the workflow is
-    # harmless in a fork or a fresh clone.
+    # Off until the server is set up, so the workflow is harmless in a fork or
+    # a fresh clone.
     if: ${{ vars.DEPLOY_ENABLED == 'true' }}
     environment: production
+    # This job only pulls the image, so its token gets read-only package access.
+    permissions:
+      contents: read
+      packages: read
     steps:
       - name: Pull and restart over SSH
         uses: appleboy/ssh-action@v1
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          # Pin the exact commit that was just built, not a moving :latest tag.
+          IMAGE: ${{ needs.build-and-push.outputs.image }}:${{ github.sha }}
+          GHCR_USER: ${{ github.actor }}
+          # Short-lived (expires when this job ends) and read-only, see above.
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
+          envs: DEPLOY_PATH,IMAGE,GHCR_USER,GHCR_TOKEN
           script: |
             set -euo pipefail
-            cd "${{ secrets.DEPLOY_PATH }}"
-            docker compose pull
-            docker compose up -d --remove-orphans
+            cd "$DEPLOY_PATH"
+            # The image is private: log in for the pull, and always log out
+            # again so no registry credential is left behind on the server.
+            trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            export CANVAS_AUDIO_IMAGE="$IMAGE"
+            docker compose -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.prod.yml up -d --remove-orphans
             docker image prune -f

@@ -141,7 +141,7 @@ app/
 ## Installasjon
 
 ```bash
-git clone <ditt-repo> canvas-audio
+git clone https://github.com/oleandrw/canvas-audio.git
 cd canvas-audio
 ```
 
@@ -301,6 +301,23 @@ docker compose up -d
 containeren bygges på nytt. `pricing.toml` er montert read-only slik at priser
 kan rettes uten å bygge imaget på nytt.
 
+Det finnes to compose-filer:
+
+| Fil | Brukes til | Image |
+| --- | --- | --- |
+| `docker-compose.yml` | lokal kjøring | bygges fra kildekoden (`build: .`) |
+| `docker-compose.prod.yml` | server, via deploy-workflowen | ferdig image fra `ghcr.io/oleandrw/canvas-audio` |
+
+Containeren kjører som bruker `10001`, ikke root. På en Linux-server må derfor
+`data/` og `output/` være skrivbare for den brukeren, ellers får appen ikke
+laget databasen og stopper ved oppstart:
+
+```bash
+sudo chown -R 10001:10001 data output
+```
+
+Docker Desktop på Windows og macOS håndhever ikke dette for bind mounts.
+
 ---
 
 ## Tester
@@ -349,27 +366,65 @@ Automatiske tester gjør aldri betalte kall. Slik verifiserer du mot ekte tjenes
 
 ## GitHub og deployment
 
-Repoet er klart til å pushes. `.gitignore` dekker `.env`, virtuelle miljøer,
-`__pycache__/`, `*.db`, `output/`, IDE- og OS-filer.
+Koden ligger i et privat repo: <https://github.com/oleandrw/canvas-audio>.
+`.gitignore` dekker `.env`, virtuelle miljøer, `__pycache__/`, `*.db`,
+`output/`, IDE- og OS-filer.
 
 ```bash
-git init          # allerede kjørt hvis du fikk prosjektet ferdig oppsatt
-git add .
-git commit -m "Canvas til lyd"
-git remote add origin git@github.com:<bruker>/<repo>.git
-git push -u origin main
+git clone https://github.com/oleandrw/canvas-audio.git
 ```
+
+Siden repoet er privat, krever kloning at du er innlogget, for eksempel med
+`gh auth login` eller Git Credential Manager.
 
 **CI** (`.github/workflows/ci.yml`) kjører på push og pull request: installerer
 Python 3.11/3.12/3.13, kjører Ruff (lint + format), importsjekk, hele
 testsuiten, og bygger Docker-imaget.
 
-**Deployment** (`.github/workflows/deploy.yml`) er holdt adskilt. Den bygger og
-pusher imaget til GitHub Container Registry ved push til `main`, og kan
-eventuelt SSH-e til en server og kjøre `docker compose pull && up -d`. Ingen
-credentials ligger i filen – alt kommer fra GitHub Secrets
-(`DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `DEPLOY_PATH`) og
-deploy-steget kjører bare når repo-variabelen `DEPLOY_ENABLED` er `true`.
+**Deployment** (`.github/workflows/deploy.yml`) er holdt adskilt fra CI og
+kjører ved push til `main`:
+
+1. Bygger imaget og pusher det til `ghcr.io/oleandrw/canvas-audio`, merket både
+   `latest` og med commit-SHA. Dette skjer alltid.
+2. Kobler til serveren over SSH, henter **nøyaktig det imaget som nettopp ble
+   bygget** (SHA-merket, ikke `latest`) og starter det med
+   `docker-compose.prod.yml`. Dette skjer bare når repo-variabelen
+   `DEPLOY_ENABLED` er `true`.
+
+Innloggingen mot registryet på serveren bruker jobbens innebygde token. Tokenet
+har bare lesetilgang til pakker, utløper når jobben er ferdig, og serveren logges
+ut igjen etterpå, så ingen credential blir liggende igjen. Ingen credentials
+ligger i workflow-filen.
+
+### Sette opp en server
+
+1. Installer Docker og Docker Compose på serveren.
+2. Lag en mappe, for eksempel `/opt/canvas-audio`, med `data/` og `output/` som
+   eies av containerbrukeren:
+
+   ```bash
+   sudo mkdir -p /opt/canvas-audio/data /opt/canvas-audio/output
+   sudo chown -R 10001:10001 /opt/canvas-audio/data /opt/canvas-audio/output
+   ```
+
+3. Kopier `docker-compose.prod.yml` dit, og lag en `.env` ut fra
+   `.env.example`. Sett gjerne `SECRET_KEY` og `APP_PASSWORD`, og
+   `HTTPS_ONLY=1` hvis serveren står bak HTTPS.
+4. Legg inn secrets og slå på deploy i repoet:
+
+   ```bash
+   gh secret set DEPLOY_HOST -R oleandrw/canvas-audio
+   gh secret set DEPLOY_USER -R oleandrw/canvas-audio
+   gh secret set DEPLOY_SSH_KEY -R oleandrw/canvas-audio < ~/.ssh/deploy_key
+   gh secret set DEPLOY_PATH -R oleandrw/canvas-audio --body /opt/canvas-audio
+   gh variable set DEPLOY_ENABLED -R oleandrw/canvas-audio --body true
+   ```
+
+   `DEPLOY_USER` må kunne kjøre `docker` på serveren (for eksempel ved å være i
+   `docker`-gruppen).
+
+Endrer du `docker-compose.prod.yml` senere, må du kopiere den til serveren på
+nytt. Workflowen henter nye images, men ikke compose-filen.
 
 ---
 
