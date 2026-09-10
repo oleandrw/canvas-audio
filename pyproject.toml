@@ -51,5 +51,8 @@ ignore = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Put the project root on sys.path so `from tests.conftest import ...` works no
+# matter whether pytest is started as `pytest` or `python -m pytest`.
+pythonpath = ["."]
 asyncio_mode = "auto"
 filterwarnings = ["ignore::DeprecationWarning"]
