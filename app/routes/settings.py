@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -11,7 +12,13 @@ from app.config import SECRET_KEYS, get_settings, get_store, mask, reset_store
 from app.database import get_session
 from app.logging_config import get_logger
 from app.schemas.common import TestResult
-from app.schemas.settings import SecretStatus, SettingsSaved, SettingsStatus, SettingsUpdate
+from app.schemas.settings import (
+    ConnectionTestRequest,
+    SecretStatus,
+    SettingsSaved,
+    SettingsStatus,
+    SettingsUpdate,
+)
 from app.security import require_auth
 from app.services import (
     anthropic_service,
@@ -131,10 +138,33 @@ def save_settings(
     )
 
 
+#: Which form fields belong to which provider's "Test connection" button.
+TEST_FIELDS: dict[str, tuple[str, ...]] = {
+    "canvas": ("canvas_url", "canvas_token"),
+    "elevenlabs": ("elevenlabs_api_key",),
+    "openai": ("openai_api_key",),
+    "anthropic": ("anthropic_api_key",),
+    "soundcloud": ("soundcloud_client_id", "soundcloud_client_secret"),
+}
+
+
 @router.post("/test/{provider}", response_model=TestResult)
-async def test_provider(provider: str) -> TestResult:
-    """Verify one set of credentials. Nothing here costs money."""
-    settings = get_settings()
+async def test_provider(provider: str, payload: ConnectionTestRequest | None = None) -> TestResult:
+    """Verify one set of credentials. Nothing here costs money.
+
+    Values typed into the form are tested as-is, even before they are saved;
+    empty fields fall back to the saved configuration. Nothing is persisted.
+    """
+    typed = payload.model_dump() if payload else {}
+    overrides = {
+        field: typed[field].strip()
+        for field in TEST_FIELDS.get(provider, ())
+        if typed.get(field, "").strip()
+    }
+    if "canvas_url" in overrides:
+        overrides["canvas_url"] = overrides["canvas_url"].rstrip("/")
+    settings = replace(get_settings(), **overrides)
+
     try:
         result = await _run_test(provider, settings)
     except ServiceError as exc:
@@ -144,7 +174,12 @@ async def test_provider(provider: str) -> TestResult:
     except Exception as exc:  # pragma: no cover - defensive
         logger.exception("Connection test crashed for %s", provider)
         return TestResult(ok=False, provider=provider, detail=f"Uventet feil: {exc}")
-    return TestResult(ok=bool(result.get("ok")), provider=provider, detail=result.get("detail", ""))
+
+    ok = bool(result.get("ok"))
+    detail = str(result.get("detail", ""))
+    if ok and overrides:
+        detail += " Verdiene er ikke lagret ennå – klikk «Lagre innstillinger»."
+    return TestResult(ok=ok, provider=provider, detail=detail)
 
 
 async def _run_test(provider: str, settings: Any) -> dict[str, Any]:

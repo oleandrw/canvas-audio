@@ -67,6 +67,54 @@ class TestSettingsApi:
     def test_unknown_provider_test_is_a_404(self, client: TestClient) -> None:
         assert client.post("/api/settings/test/facebook").status_code == 404
 
+    def _capture_canvas_check(self, monkeypatch) -> dict[str, str]:
+        from app.services import canvas_service
+
+        seen: dict[str, str] = {}
+
+        async def fake_check(url: str, token: str, **_kwargs: Any) -> dict[str, Any]:
+            seen["url"], seen["token"] = url, token
+            return {"ok": True, "detail": "Tilkoblet som Test."}
+
+        monkeypatch.setattr(canvas_service, "check_canvas_connection", fake_check)
+        return seen
+
+    def test_connection_test_uses_values_typed_in_the_form(
+        self, client: TestClient, monkeypatch, env
+    ) -> None:
+        seen = self._capture_canvas_check(monkeypatch)
+        response = client.post(
+            "/api/settings/test/canvas",
+            json={"canvas_url": "https://hiof.instructure.com/", "canvas_token": "typed-token"},
+        )
+        body = response.json()
+        assert body["ok"] is True
+        assert seen == {"url": "https://hiof.instructure.com", "token": "typed-token"}
+        assert "ikke lagret" in body["detail"]
+        assert not (env / ".env").exists(), "testing a connection must never save anything"
+
+    def test_connection_test_falls_back_to_saved_values(
+        self, client: TestClient, monkeypatch
+    ) -> None:
+        seen = self._capture_canvas_check(monkeypatch)
+        body = client.post("/api/settings/test/canvas").json()
+        assert body["ok"] is True
+        assert seen == {
+            "url": "https://canvas.example.test",
+            "token": "12345~dummy-canvas-token-for-tests",
+        }
+        assert "ikke lagret" not in body["detail"]
+
+    def test_connection_test_ignores_fields_of_other_providers(
+        self, client: TestClient, monkeypatch
+    ) -> None:
+        seen = self._capture_canvas_check(monkeypatch)
+        client.post(
+            "/api/settings/test/canvas",
+            json={"elevenlabs_api_key": "belongs-to-another-provider"},
+        )
+        assert seen["token"] == "12345~dummy-canvas-token-for-tests"
+
 
 class TestPagesApi:
     def test_lists_pages_of_the_selected_course(

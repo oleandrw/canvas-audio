@@ -95,3 +95,19 @@ class SettingsSaved(BaseModel):
     written: list[str] = Field(default_factory=list)
     skipped_env_managed: list[str] = Field(default_factory=list)
     message: str = ""
+
+
+class ConnectionTestRequest(BaseModel):
+    """Values typed into the Settings form that may not be saved yet.
+
+    "Test connection" checks exactly what the user typed. Empty fields fall back
+    to the saved configuration, and nothing in here is ever persisted.
+    """
+
+    canvas_url: str = Field(default="", max_length=500)
+    canvas_token: str = Field(default="", max_length=2000)
+    elevenlabs_api_key: str = Field(default="", max_length=2000)
+    openai_api_key: str = Field(default="", max_length=2000)
+    anthropic_api_key: str = Field(default="", max_length=2000)
+    soundcloud_client_id: str = Field(default="", max_length=500)
+    soundcloud_client_secret: str = Field(default="", max_length=2000)

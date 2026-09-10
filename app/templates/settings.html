@@ -315,10 +315,25 @@
     });
   }
 
+  // Fields each "Test" button reads. What is typed right now is tested even if
+  // it is not saved; empty fields fall back to the saved value on the server.
+  const TEST_FIELDS = {
+    canvas: ["canvas_url", "canvas_token"],
+    elevenlabs: ["elevenlabs_api_key"],
+    openai: ["openai_api_key"],
+    anthropic: ["anthropic_api_key"],
+    soundcloud: ["soundcloud_client_id", "soundcloud_client_secret"],
+  };
+
   async function testProvider(provider, button) {
     const box = document.getElementById("test-" + provider + "-result");
+    const body = {};
+    (TEST_FIELDS[provider] || []).forEach(function (id) {
+      const el = document.getElementById(id);
+      if (el && !el.disabled && el.value.trim()) body[id] = el.value.trim();
+    });
     await withBusy(button, async function () {
-      const result = await api("/api/settings/test/" + provider, { method: "POST" });
+      const result = await api("/api/settings/test/" + provider, { method: "POST", body: body });
       const data = result.data || {};
       const ok = result.ok && data.ok;
       if (box) {
