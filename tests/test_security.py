@@ -32,6 +32,19 @@ class TestSafeJoin:
         with pytest.raises((UnsafePathError, ValueError)):
             safe_join(tmp_path, *segments)
 
+    @pytest.mark.parametrize(
+        "segment",
+        [r"C:\Windows\System32", "C:/Windows/System32", "D:relative", r"\\server\share\x"],
+    )
+    def test_windows_drive_and_unc_paths_are_rejected_on_every_platform(
+        self, tmp_path: Path, segment: str
+    ) -> None:
+        # Must be caught by the segment check itself, not by resolve(): on Linux a
+        # drive-letter path is just a relative folder name, so relying on resolve()
+        # made the outcome depend on the operating system.
+        with pytest.raises(UnsafePathError, match="Unsafe path segment"):
+            safe_join(tmp_path, segment)
+
     def test_backslashes_are_treated_as_separators(self, tmp_path: Path) -> None:
         result = safe_join(tmp_path, "emne\\modul", "fil.mp3")
         assert result.parent.name == "modul"

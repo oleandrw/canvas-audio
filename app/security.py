@@ -6,7 +6,7 @@ import base64
 import hashlib
 import hmac
 import secrets
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import HTTPException, Request, status
@@ -33,7 +33,11 @@ def safe_join(base: Path, *parts: str) -> Path:
         if part in ("", "."):
             continue
         pure = PurePosixPath(part.replace("\\", "/"))
-        if pure.is_absolute() or ".." in pure.parts:
+        # Check the Windows reading too, so a drive letter ("C:\x", "D:rel") or a UNC
+        # path is refused on every OS. On Linux "C:/x" would otherwise pass as a
+        # plain folder name, while on Windows it silently replaces ``base``.
+        windows = PureWindowsPath(part)
+        if pure.is_absolute() or windows.drive or windows.root or ".." in pure.parts:
             raise UnsafePathError(f"Unsafe path segment: {part!r}")
         candidate = candidate / pure
     resolved = candidate.resolve()
