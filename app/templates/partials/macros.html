@@ -1,0 +1,23 @@
+{# Reusable form fragments. #}
+
+{% macro secret_field(field_id, config_key, hint="") -%}
+{% set info = secret_info(config_key) %}
+<div class="field">
+  <label for="{{ field_id }}">
+    {{ info.label }}
+    {% if info.configured %}
+      <span class="badge badge-ok">Satt · {{ info.masked }}</span>
+    {% else %}
+      <span class="badge badge-muted">Ikke satt</span>
+    {% endif %}
+    {% if info.locked %}<span class="badge badge-info">Fra miljøvariabel</span>{% endif %}
+  </label>
+  <input type="password" id="{{ field_id }}" autocomplete="new-password"
+         placeholder="{{ 'Styres av miljøvariabel' if info.locked else ('Skriv inn ny verdi for å endre' if info.configured else 'Ikke satt') }}"
+         {{ "disabled" if info.locked }}>
+  {% if hint %}<p class="field-hint">{{ hint }}</p>{% endif %}
+  {% if info.locked %}
+  <p class="field-hint">Verdien kommer fra prosessmiljøet og kan ikke endres fra GUI-et.</p>
+  {% endif %}
+</div>
+{%- endmacro %}

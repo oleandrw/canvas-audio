@@ -1,0 +1,257 @@
+{% extends "base.html" %}
+{% block title %}{{ page.title }} · Canvas → Lyd{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <p class="dim" style="margin-bottom: var(--space-2);">
+      <a href="/canvas">🎓 Canvas</a> / {{ page.module_name }}
+    </p>
+    <h1>{{ page.title }}</h1>
+    <p class="subtitle">
+      <span class="badge {{ status_badge(page.status) }}">{{ status_icon(page.status) }} {{ page.status_label }}</span>
+      <span class="dim">
+        Canvas-ID {{ page.canvas_page_id }}
+        {% if page.canvas_updated_at %} · endret i Canvas {{ page.canvas_updated_at.strftime("%d.%m.%Y %H:%M") }}{% endif %}
+      </span>
+    </p>
+  </div>
+</div>
+
+{% if page.last_error %}
+<div class="alert alert-error">
+  <span class="alert-icon">⚠️</span><div>{{ page.last_error }}</div>
+</div>
+{% endif %}
+
+<section class="section">
+  <div class="card">
+    <div class="card-header">
+      <h2>Tekst</h2>
+      <span class="spacer dim">
+        {{ nb(page.characters) }} tegn · {{ nb(page.words) }} ord
+        {% if page.manually_edited %}<span class="badge badge-brand">Redigert manuelt</span>{% endif %}
+        {% if page.processed_by != "none" %}<span class="badge badge-info">{{ provider_label(page.processed_by) }} · {{ page.processed_model }}</span>{% endif %}
+      </span>
+    </div>
+
+    <div class="editor-grid">
+      <div class="editor-pane">
+        <label>Originaltekst <span class="dim">(fra Canvas, renset for HTML)</span></label>
+        <p class="field-hint">Skrivebeskyttet. Kjør «Rens på nytt» hvis Canvas-HTML-en er endret.</p>
+        <div class="readonly-text">{{ page.original_text or "Ingen tekst hentet ennå." }}</div>
+      </div>
+      <div class="editor-pane">
+        <label for="processed">Bearbeidet tekst <span class="dim">(dette leses opp)</span></label>
+        <p class="field-hint">Er feltet tomt, brukes originalteksten. Endringer her sendes til ElevenLabs.</p>
+        <textarea id="processed" spellcheck="false">{{ page.processed_text }}</textarea>
+      </div>
+    </div>
+
+    <div class="btn-row" style="margin-top: var(--space-5);">
+      <button class="btn btn-primary" onclick="saveText(this)">💾 Lagre tekst</button>
+      <button class="btn btn-ghost" onclick="recleanText(this)">🧹 Rens på nytt</button>
+      <button class="btn btn-ghost" onclick="resetText(this)">↩️ Nullstill til original</button>
+      <span class="spacer"></span>
+      <select id="ai-provider" style="width: auto; min-width: 170px;">
+        <option value="none">Ingen AI</option>
+        <option value="openai" {{ "selected" if prefs.ai_provider == "openai" }}>OpenAI</option>
+        <option value="anthropic" {{ "selected" if prefs.ai_provider == "anthropic" }}>Anthropic</option>
+      </select>
+      <select id="ai-model" style="width: auto; min-width: 200px;"></select>
+      <button class="btn btn-ghost" onclick="processText(this)">✨ Bearbeid med AI</button>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="card">
+    <div class="card-header">
+      <h2>Lyd</h2>
+      {% if page.audio %}
+      <span class="spacer dim">
+        {{ page.audio.voice_name or page.audio.voice_id }} · {{ page.audio.model_id }} ·
+        {{ nb(page.audio.character_count) }} tegn ·
+        {{ page.audio.generated_at.strftime("%d.%m.%Y %H:%M") if page.audio.generated_at }}
+      </span>
+      {% endif %}
+    </div>
+
+    {% if page.audio and page.audio.exists_on_disk %}
+    <div class="player">
+      <button class="player-btn" type="button" aria-label="Spill av">▶</button>
+      <div class="player-body">
+        <div class="player-timeline"><div class="player-progress"></div></div>
+        <div class="player-times">
+          <span data-role="current">0:00</span>
+          <span data-role="duration">{{ page.audio.duration_label }}</span>
+        </div>
+      </div>
+      <audio preload="metadata" src="/api/audio/{{ page.id }}"></audio>
+    </div>
+    <p class="field-hint mono">{{ page.audio.relative_path }} · {{ size_label }}</p>
+    {% elif page.audio %}
+    <div class="alert alert-warn">
+      <span class="alert-icon">📁</span>
+      <div>Lydfilen er registrert, men mangler på disk ({{ page.audio.relative_path }}). Generer på nytt.</div>
+    </div>
+    {% else %}
+    <div class="empty-state"><span class="emoji">🔇</span>Ingen lyd generert for denne siden ennå.</div>
+    {% endif %}
+
+    <div class="btn-row" style="margin-top: var(--space-5);">
+      <button class="btn btn-primary" onclick="generateAudio(this)" {{ "disabled" if not prefs.tts_ready }}>
+        {% if page.audio %}♻️ Regenerer lyd{% else %}🎧 Generer lyd{% endif %}
+      </button>
+      {% if page.audio %}
+      <a class="btn btn-ghost" href="/api/audio/{{ page.id }}?download=1">⬇️ Last ned</a>
+      <button class="btn btn-danger" onclick="deleteAudio(this)">🗑️ Slett lydfil</button>
+      {% endif %}
+    </div>
+    {% if not prefs.tts_ready %}
+    <p class="field-hint">Velg ElevenLabs-stemme og -modell under <a href="/innstillinger">Innstillinger</a> først.</p>
+    {% endif %}
+  </div>
+</section>
+
+<section class="section">
+  <div class="card">
+    <div class="card-header"><h2>☁️ SoundCloud</h2></div>
+    {% if page.soundcloud and page.soundcloud.track_id %}
+    <div class="row">
+      <span class="badge {{ 'badge-ok' if page.soundcloud.up_to_date else 'badge-warn' }}">
+        {{ "Lastet opp" if page.soundcloud.up_to_date else "Lydfilen er endret siden opplasting" }}
+      </span>
+      {% if page.soundcloud.permalink_url %}
+      <a href="{{ page.soundcloud.permalink_url }}" target="_blank" rel="noopener">Åpne på SoundCloud ↗</a>
+      {% endif %}
+      <span class="dim">Track-ID {{ page.soundcloud.track_id }}</span>
+    </div>
+    {% else %}
+    <p class="dim">Ikke lastet opp.</p>
+    {% endif %}
+    <div class="btn-row" style="margin-top: var(--space-4);">
+      <button class="btn btn-ghost" onclick="uploadToSoundCloud(this)" {{ "disabled" if not page.audio }}>
+        ☁️ Last opp til SoundCloud
+      </button>
+    </div>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const PAGE_ID = {{ page.id }};
+  const AI_MODELS = {{ ai_models_json|safe }};
+  const CURRENT_AI_MODEL = {{ prefs.ai_model|tojson }};
+
+  function fillModels() {
+    const provider = document.getElementById("ai-provider").value;
+    const select = document.getElementById("ai-model");
+    const models = AI_MODELS[provider] || [];
+    select.innerHTML = "";
+    if (!models.length) {
+      select.innerHTML = '<option value="">— ikke relevant —</option>';
+      select.disabled = true;
+      return;
+    }
+    select.disabled = false;
+    models.forEach(function (m) {
+      const option = document.createElement("option");
+      option.value = m.id;
+      option.textContent = m.label;
+      if (m.id === CURRENT_AI_MODEL) option.selected = true;
+      select.appendChild(option);
+    });
+  }
+
+  async function saveText(button) {
+    await withBusy(button, async function () {
+      const result = await api("/api/pages/" + PAGE_ID + "/text", {
+        method: "PUT",
+        body: { processed_text: document.getElementById("processed").value },
+      });
+      toast(result.ok ? "Teksten er lagret." : errorMessage(result, "Kunne ikke lagre."),
+            result.ok ? "ok" : "error");
+    });
+  }
+
+  async function recleanText(button) {
+    await withBusy(button, async function () {
+      const result = await api("/api/pages/" + PAGE_ID + "/clean", { method: "POST" });
+      if (!result.ok) return toast(errorMessage(result, "Rensing feilet."), "error");
+      toast("Teksten er renset på nytt.", "ok");
+      setTimeout(function () { location.reload(); }, 700);
+    });
+  }
+
+  async function resetText(button) {
+    const yes = await confirmDialog(
+      "Nullstill tekst",
+      "Dette fjerner både AI-bearbeidet og manuelt redigert tekst for denne siden.",
+      "Nullstill");
+    if (!yes) return;
+    await withBusy(button, async function () {
+      const result = await api("/api/pages/" + PAGE_ID + "/reset-text", { method: "POST" });
+      if (!result.ok) return toast(errorMessage(result, "Kunne ikke nullstille."), "error");
+      location.reload();
+    });
+  }
+
+  async function processText(button) {
+    const provider = document.getElementById("ai-provider").value;
+    if (provider === "none") return toast("Velg OpenAI eller Anthropic først.", "error");
+    const yes = await confirmDialog(
+      "Bearbeid med AI",
+      "Dette gjør ett betalt API-kall for denne siden. Fortsette?",
+      "Ja, bearbeid");
+    if (!yes) return;
+
+    await withBusy(button, async function () {
+      const result = await api("/api/pages/" + PAGE_ID + "/process", {
+        method: "POST",
+        body: { ai_provider: provider, ai_model: document.getElementById("ai-model").value, force: true },
+      });
+      if (!result.ok) return toast(errorMessage(result, "AI-bearbeiding feilet."), "error");
+      document.getElementById("processed").value = result.data.processed_text;
+      toast("Teksten er bearbeidet.", "ok");
+    });
+  }
+
+  async function generateAudio(button) {
+    await withBusy(button, async function () {
+      const result = await api("/api/pages/" + PAGE_ID + "/generate", { method: "POST" });
+      if (!result.ok) return toast(errorMessage(result, "Kunne ikke starte generering."), "error");
+      toast("Lydgenerering startet. Oppdaterer…", "ok");
+      setTimeout(function () { location.reload(); }, 4000);
+    });
+  }
+
+  async function deleteAudio(button) {
+    const yes = await confirmDialog("Slett lydfil", "Lydfilen slettes fra disk. Er du sikker?", "Slett");
+    if (!yes) return;
+    await withBusy(button, async function () {
+      const result = await api("/api/pages/" + PAGE_ID + "/audio", { method: "DELETE" });
+      if (!result.ok) return toast(errorMessage(result, "Kunne ikke slette."), "error");
+      location.reload();
+    });
+  }
+
+  async function uploadToSoundCloud(button) {
+    await withBusy(button, async function () {
+      const result = await api("/api/soundcloud/upload", {
+        method: "POST",
+        body: { page_ids: [PAGE_ID], force: false },
+      });
+      if (!result.ok) return toast(errorMessage(result, "Opplasting feilet."), "error");
+      toast(result.data.message, "ok");
+      setTimeout(function () { location.reload(); }, 1200);
+    });
+  }
+
+  document.addEventListener("DOMContentLoaded", fillModels);
+  document.addEventListener("DOMContentLoaded", function () {
+    document.getElementById("ai-provider").onchange = fillModels;
+  });
+</script>
+{% endblock %}

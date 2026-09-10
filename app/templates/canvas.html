@@ -1,0 +1,397 @@
+{% extends "base.html" %}
+{% block title %}Canvas · Canvas → Lyd{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1>🎓 Canvas</h1>
+    <p class="subtitle">
+      Velg emne, synkroniser strukturen og plukk hvilke sider som skal bli lyd.
+      Synkronisering endrer aldri eksisterende lydfiler.
+    </p>
+  </div>
+</div>
+
+{% if not canvas_configured %}
+<div class="alert alert-warn">
+  <span class="alert-icon">🔑</span>
+  <div>Canvas-URL og token må settes under <a href="/innstillinger">Innstillinger</a> før du kan hente emner.</div>
+</div>
+{% endif %}
+
+<section class="section">
+  <div class="card">
+    <div class="card-header"><h2>Velg emne</h2></div>
+    <div class="field-row">
+      <div class="field" style="flex: 2 1 320px;">
+        <label for="course-select">Emner fra Canvas</label>
+        <select id="course-select">
+          <option value="">— last inn emner —</option>
+        </select>
+        <p class="field-hint">Noen Canvas-tokens kan ikke liste emner. Da bruker du feltet ved siden av.</p>
+      </div>
+      <div class="field">
+        <label for="course-id">Emne-ID manuelt</label>
+        <input type="text" id="course-id" inputmode="numeric" placeholder="f.eks. 41234"
+               value="{{ course.canvas_course_id if course else '' }}">
+      </div>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-ghost" onclick="loadCourses(this)" {{ "disabled" if not canvas_configured }}>
+        📥 Hent emner
+      </button>
+      <button class="btn btn-primary" onclick="syncCourse(this)" {{ "disabled" if not canvas_configured }}>
+        🔄 Synkroniser Canvas
+      </button>
+    </div>
+  </div>
+</section>
+
+{% if course %}
+<section class="section">
+  <div class="card">
+    <div class="card-header">
+      <h2>Valg for generering</h2>
+      <span class="spacer badge {{ 'badge-ok' if prefs.tts_ready else 'badge-warn' }}">
+        {{ "Klar" if prefs.tts_ready else "Velg stemme og modell" }}
+      </span>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label for="ai-provider">AI-bearbeiding</label>
+        <select id="ai-provider" onchange="onProviderChange()">
+          <option value="none" {{ "selected" if prefs.ai_provider == "none" }}>Ingen AI (standard)</option>
+          <option value="openai" {{ "selected" if prefs.ai_provider == "openai" }}>OpenAI</option>
+          <option value="anthropic" {{ "selected" if prefs.ai_provider == "anthropic" }}>Anthropic</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="ai-model">AI-modell</label>
+        <select id="ai-model"></select>
+      </div>
+      <div class="field">
+        <label for="voice-id">ElevenLabs-stemme</label>
+        <select id="voice-id">
+          <option value="">— ikke valgt —</option>
+          {% if prefs.voice_id %}<option value="{{ prefs.voice_id }}" selected>{{ prefs.voice_name or prefs.voice_id }}</option>{% endif %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="tts-model">ElevenLabs-modell</label>
+        <select id="tts-model">
+          <option value="">— ikke valgt —</option>
+          {% if prefs.tts_model_id %}<option value="{{ prefs.tts_model_id }}" selected>{{ prefs.tts_model_id }}</option>{% endif %}
+        </select>
+      </div>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-ghost btn-sm" onclick="loadVoices(this)">🎙️ Hent stemmer og modeller</button>
+      <button class="btn btn-ghost btn-sm" onclick="savePreferences(this)">💾 Lagre valg</button>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="section-title">
+    {{ course.name }}
+    <span class="badge badge-muted">{{ stats.modules }} moduler · {{ stats.pages }} sider</span>
+  </div>
+
+  <div class="btn-row" style="margin-bottom: var(--space-4);">
+    <button class="btn btn-ghost btn-sm" onclick="selectAll(true)">Velg alle</button>
+    <button class="btn btn-ghost btn-sm" onclick="selectAll(false)">Fjern alle</button>
+    <button class="btn btn-ghost btn-sm" onclick="selectByStatus(['not_generated'])">Velg manglende</button>
+    <button class="btn btn-ghost btn-sm" onclick="selectByStatus(['canvas_changed','text_changed'])">Velg endrede</button>
+  </div>
+
+  {% for group in groups %}
+  {% set module_index = loop.index %}
+  <div class="module">
+    <div class="module-head">
+      <span class="chevron">▼</span>
+      <input type="checkbox" class="module-check" data-module="{{ module_index }}"
+             onclick="toggleModule(this)" aria-label="Velg hele modulen">
+      <span class="module-title">
+        {% if group.module %}{{ group.module.name }}{% else %}Uten modul{% endif %}
+      </span>
+      <span class="module-meta">
+        <span class="dim">{{ group.pages|length }} sider</span>
+        <span class="badge badge-muted">{{ group.ready }} klare</span>
+      </span>
+    </div>
+    <div class="module-body" data-module-body="{{ module_index }}">
+      {% for page in group.pages %}
+      <div class="page-row">
+        <input type="checkbox" class="page-check" value="{{ page.id }}"
+               data-status="{{ page.status }}" data-module="{{ module_index }}"
+               data-characters="{{ page.characters }}" onchange="refreshEstimate()">
+        <span class="page-row-title">
+          <a href="/side/{{ page.id }}">{{ page.title }}</a>
+          <div class="page-row-meta">
+            {{ "{:,}".format(page.characters).replace(",", " ") }} tegn ·
+            {{ "{:,}".format(page.words).replace(",", " ") }} ord
+          </div>
+        </span>
+        <span class="badge {{ status_badge(page.status) }}">{{ status_icon(page.status) }} {{ page.status_label }}</span>
+      </div>
+      {% else %}
+      <div class="page-row dim">Ingen Canvas-sider i denne modulen.</div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endfor %}
+
+  {% if archived %}
+  <div class="alert alert-info" style="margin-top: var(--space-4);">
+    <span class="alert-icon">🗄️</span>
+    <div>
+      <strong>{{ archived|length }} sider finnes ikke lenger i Canvas.</strong>
+      De er beholdt lokalt med lydfilene sine, men kan ikke velges:
+      {{ archived|map(attribute="title")|join(", ") }}
+    </div>
+  </div>
+  {% endif %}
+</section>
+
+<section class="section">
+  <div class="card" id="estimate-card">
+    <div class="card-header">
+      <h2>Genereringsoversikt</h2>
+      <span class="spacer badge badge-muted">Estimert kostnad</span>
+    </div>
+    <div id="estimate-body">
+      <p class="dim">Velg sider for å se estimatet.</p>
+    </div>
+    <div class="btn-row" style="margin-top: var(--space-5);">
+      <button class="btn btn-primary" id="generate-btn" onclick="startGeneration(this, false)" disabled>
+        🎧 Generer lyd for valgte
+      </button>
+      <button class="btn btn-ghost" onclick="startGeneration(this, true)" id="regen-btn" disabled>
+        ♻️ Regenerer valgte
+      </button>
+    </div>
+  </div>
+</section>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const AI_MODELS = {{ ai_models_json|safe }};
+  const CURRENT_AI_MODEL = {{ prefs.ai_model|tojson }};
+
+  function selectedIds() {
+    return Array.from(document.querySelectorAll(".page-check:checked")).map(function (el) {
+      return Number(el.value);
+    });
+  }
+
+  function selectAll(state) {
+    document.querySelectorAll(".page-check").forEach(function (el) { el.checked = state; });
+    document.querySelectorAll(".module-check").forEach(function (el) { el.checked = state; });
+    refreshEstimate();
+  }
+
+  function selectByStatus(statuses) {
+    document.querySelectorAll(".page-check").forEach(function (el) {
+      el.checked = statuses.indexOf(el.dataset.status) !== -1;
+    });
+    document.querySelectorAll(".module-check").forEach(function (el) { el.checked = false; });
+    refreshEstimate();
+  }
+
+  function toggleModule(box) {
+    const id = box.dataset.module;
+    document
+      .querySelectorAll('.page-check[data-module="' + id + '"]')
+      .forEach(function (el) { el.checked = box.checked; });
+    refreshEstimate();
+  }
+
+  function onProviderChange() {
+    const provider = document.getElementById("ai-provider").value;
+    const select = document.getElementById("ai-model");
+    const models = AI_MODELS[provider] || [];
+    select.innerHTML = "";
+    if (!models.length) {
+      select.innerHTML = '<option value="">— ikke relevant —</option>';
+      select.disabled = true;
+    } else {
+      select.disabled = false;
+      models.forEach(function (m) {
+        const option = document.createElement("option");
+        option.value = m.id;
+        option.textContent = m.label + " (" + m.price + ")";
+        if (m.id === CURRENT_AI_MODEL) option.selected = true;
+        select.appendChild(option);
+      });
+    }
+    refreshEstimate();
+  }
+
+  async function loadCourses(button) {
+    await withBusy(button, async function () {
+      const result = await api("/api/canvas/courses");
+      if (!result.ok) return toast(errorMessage(result, "Kunne ikke hente emner."), "error");
+      const select = document.getElementById("course-select");
+      select.innerHTML = '<option value="">— velg emne —</option>';
+      result.data.forEach(function (course) {
+        const option = document.createElement("option");
+        option.value = course.id;
+        option.textContent = course.name + (course.course_code ? " (" + course.course_code + ")" : "");
+        select.appendChild(option);
+      });
+      select.onchange = function () { document.getElementById("course-id").value = select.value; };
+      toast("Hentet " + result.data.length + " emner.", "ok");
+    });
+  }
+
+  async function syncCourse(button) {
+    const courseId = document.getElementById("course-id").value.trim()
+      || document.getElementById("course-select").value;
+    if (!courseId) return toast("Velg et emne eller skriv inn en emne-ID.", "error");
+    await withBusy(button, async function () {
+      const result = await api("/api/canvas/sync", { method: "POST", body: { course_id: courseId } });
+      if (!result.ok) return toast(errorMessage(result, "Synkronisering feilet."), "error");
+      toast(result.data.message, "ok");
+      setTimeout(function () { location.reload(); }, 900);
+    });
+  }
+
+  async function loadVoices(button) {
+    await withBusy(button, async function () {
+      const [voices, models] = await Promise.all([
+        api("/api/elevenlabs/voices"),
+        api("/api/elevenlabs/models"),
+      ]);
+      if (!voices.ok) return toast(errorMessage(voices, "Kunne ikke hente stemmer."), "error");
+      if (!models.ok) return toast(errorMessage(models, "Kunne ikke hente modeller."), "error");
+
+      const voiceSelect = document.getElementById("voice-id");
+      const current = voiceSelect.value;
+      voiceSelect.innerHTML = '<option value="">— ikke valgt —</option>';
+      voices.data.forEach(function (v) {
+        const option = document.createElement("option");
+        option.value = v.voice_id;
+        option.textContent = v.name + (v.category ? " · " + v.category : "");
+        if (v.voice_id === current) option.selected = true;
+        voiceSelect.appendChild(option);
+      });
+
+      const modelSelect = document.getElementById("tts-model");
+      const currentModel = modelSelect.value;
+      modelSelect.innerHTML = '<option value="">— ikke valgt —</option>';
+      models.data.forEach(function (m) {
+        const option = document.createElement("option");
+        option.value = m.model_id;
+        option.textContent = m.name;
+        if (m.model_id === currentModel) option.selected = true;
+        modelSelect.appendChild(option);
+      });
+      modelSelect.onchange = refreshEstimate;
+      toast("Hentet " + voices.data.length + " stemmer og " + models.data.length + " modeller.", "ok");
+      refreshEstimate();
+    });
+  }
+
+  async function savePreferences(button) {
+    const voiceSelect = document.getElementById("voice-id");
+    const payload = {
+      ai_provider: document.getElementById("ai-provider").value,
+      ai_model: document.getElementById("ai-model").value,
+      elevenlabs_voice_id: voiceSelect.value,
+      elevenlabs_voice_name: voiceSelect.options[voiceSelect.selectedIndex]
+        ? voiceSelect.options[voiceSelect.selectedIndex].textContent.split(" · ")[0]
+        : "",
+      elevenlabs_model_id: document.getElementById("tts-model").value,
+    };
+    await withBusy(button, async function () {
+      const result = await api("/api/settings", { method: "POST", body: payload });
+      toast(result.ok ? "Valgene er lagret." : errorMessage(result, "Kunne ikke lagre."),
+            result.ok ? "ok" : "error");
+    });
+  }
+
+  let estimateTimer = null;
+  function refreshEstimate() {
+    clearTimeout(estimateTimer);
+    estimateTimer = setTimeout(doRefreshEstimate, 250);
+  }
+
+  async function doRefreshEstimate() {
+    const ids = selectedIds();
+    const generateBtn = document.getElementById("generate-btn");
+    const regenBtn = document.getElementById("regen-btn");
+    const body = document.getElementById("estimate-body");
+    if (!body) return;
+
+    if (!ids.length) {
+      body.innerHTML = '<p class="dim">Velg sider for å se estimatet.</p>';
+      if (generateBtn) generateBtn.disabled = true;
+      if (regenBtn) regenBtn.disabled = true;
+      return;
+    }
+
+    const result = await api("/fragments/estimate", {
+      method: "POST",
+      body: {
+        page_ids: ids,
+        mode: "selected",
+        ai_provider: document.getElementById("ai-provider").value,
+        ai_model: document.getElementById("ai-model").value,
+        tts_model: document.getElementById("tts-model").value,
+        force_regenerate: false,
+      },
+    });
+    if (!result.ok) {
+      body.innerHTML = '<p class="dim">Kunne ikke beregne estimat.</p>';
+      return;
+    }
+    body.innerHTML = result.data.html;
+    const ready = result.data.tts_ready;
+    if (generateBtn) generateBtn.disabled = !ready;
+    if (regenBtn) regenBtn.disabled = !ready;
+  }
+
+  async function startGeneration(button, force) {
+    const ids = selectedIds();
+    if (!ids.length) return toast("Ingen sider er valgt.", "error");
+
+    const payload = {
+      page_ids: ids,
+      mode: "selected",
+      ai_provider: document.getElementById("ai-provider").value,
+      ai_model: document.getElementById("ai-model").value,
+      voice_id: document.getElementById("voice-id").value,
+      voice_name: (function () {
+        const s = document.getElementById("voice-id");
+        return s.options[s.selectedIndex] ? s.options[s.selectedIndex].textContent.split(" · ")[0] : "";
+      })(),
+      tts_model: document.getElementById("tts-model").value,
+      force_regenerate: !!force,
+      confirmed: false,
+    };
+
+    await withBusy(button, async function () {
+      let result = await api("/api/generation", { method: "POST", body: payload });
+
+      if (result.status === 409 && result.data && result.data.requires_confirmation) {
+        const proceed = await confirmDialog("Bekreft kostnad", result.data.message, "Ja, start jobben");
+        if (!proceed) return;
+        payload.confirmed = true;
+        result = await api("/api/generation", { method: "POST", body: payload });
+      }
+
+      if (!result.ok) return toast(errorMessage(result, "Kunne ikke starte jobben."), "error");
+      toast(result.data.message, "ok");
+      setTimeout(function () { location.href = "/generering?jobb=" + result.data.job_id; }, 800);
+    });
+  }
+
+  document.addEventListener("DOMContentLoaded", function () {
+    onProviderChange();
+    const ttsModel = document.getElementById("tts-model");
+    if (ttsModel) ttsModel.onchange = refreshEstimate;
+  });
+</script>
+{% endblock %}

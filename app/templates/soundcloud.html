@@ -1,0 +1,179 @@
+{% extends "base.html" %}
+{% block title %}SoundCloud · Canvas → Lyd{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1>☁️ SoundCloud</h1>
+    <p class="subtitle">
+      Valgfri publisering. Én Canvas-modul blir én SoundCloud-spilleliste, og en lydfil
+      lastes aldri opp to ganger.
+    </p>
+  </div>
+</div>
+
+{% if request.query_params.get("tilkoblet") %}
+<div class="alert alert-ok"><span class="alert-icon">✅</span><div>SoundCloud er tilkoblet.</div></div>
+{% endif %}
+{% if request.query_params.get("feil") %}
+<div class="alert alert-error">
+  <span class="alert-icon">⚠️</span>
+  <div>Tilkoblingen feilet ({{ request.query_params.get("feil") }}). Prøv igjen.</div>
+</div>
+{% endif %}
+
+<section class="section">
+  <div class="card">
+    <div class="card-header">
+      <h2>Tilkobling</h2>
+      <span class="spacer badge {{ 'badge-ok' if sc.connected else ('badge-warn' if sc.configured else 'badge-muted') }}">
+        {% if sc.connected %}Tilkoblet{% elif sc.configured %}Ikke tilkoblet{% else %}Ikke konfigurert{% endif %}
+      </span>
+    </div>
+
+    {% if sc.detail %}<p class="muted">{{ sc.detail }}</p>{% endif %}
+
+    {% if sc.connected %}
+    <div class="cost-lines">
+      <div class="cost-line"><span>Konto</span><span class="cost-value">{{ sc.account_name or "—" }}</span></div>
+      <div class="cost-line"><span>Opplastede spor</span><span class="cost-value">{{ sc.track_count }}</span></div>
+      <div class="cost-line"><span>Spillelister</span><span class="cost-value">{{ sc.playlist_count }}</span></div>
+      <div class="cost-line"><span>Deling for nye spor</span><span class="cost-value">{{ sc.sharing }}</span></div>
+    </div>
+    {% endif %}
+
+    <div class="btn-row" style="margin-top: var(--space-5);">
+      {% if sc.connected %}
+      <button class="btn btn-ghost" onclick="disconnect(this)">Koble fra</button>
+      {% else %}
+      <button class="btn btn-primary" onclick="connect(this)" {{ "disabled" if not sc.configured }}>
+        🔗 Koble til SoundCloud
+      </button>
+      {% endif %}
+      <a class="btn btn-ghost" href="/innstillinger">⚙️ Innstillinger</a>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="alert alert-info">
+    <span class="alert-icon">ℹ️</span>
+    <div>
+      <strong>Begrensninger i SoundCloud-API-et</strong> (verifisert mot den offisielle dokumentasjonen):
+      <ul style="margin: var(--space-2) 0 0; padding-left: var(--space-5);">
+        <li>Registrering av en API-applikasjon krever <strong>Artist Pro-abonnement</strong>, og godkjenning skjer manuelt.</li>
+        <li>Opplasting og spillelister krever <em>authorization code</em>-flyten med PKCE. Access token varer ca. én time, og refresh tokens er engangsbruk.</li>
+        <li>Det finnes åpne rapporter om at <code>POST /tracks</code> tidvis svarer 502/503 for enkelte kontoer.</li>
+        <li>Uten SoundCloud fungerer resten av applikasjonen som normalt.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+{% if sc.connected %}
+<section class="section">
+  <div class="card">
+    <div class="card-header"><h2>Publisering</h2></div>
+    <p class="muted">
+      Last opp genererte lydfiler for det valgte emnet, og opprett eller oppdater én spilleliste per modul.
+      Spor som allerede er lastet opp med samme lydfil gjenbrukes.
+    </p>
+    <div class="btn-row">
+      <button class="btn btn-primary" onclick="uploadAll(this)">⬆️ Last opp genererte lydfiler</button>
+      <button class="btn btn-ghost" onclick="syncPlaylists(this)">🗂️ Synkroniser spillelister</button>
+    </div>
+    <div id="sc-result" style="margin-top: var(--space-5);"></div>
+  </div>
+</section>
+{% endif %}
+
+<section class="section">
+  <div class="section-title">Moduler og spillelister</div>
+  {% if modules %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Modul</th><th class="right">Sider med lyd</th><th class="right">Opplastet</th><th>Spilleliste</th></tr>
+      </thead>
+      <tbody>
+        {% for row in modules %}
+        <tr>
+          <td>{{ row.name }}</td>
+          <td class="right">{{ row.with_audio }}</td>
+          <td class="right">{{ row.uploaded }}</td>
+          <td>
+            {% if row.playlist_url %}
+            <a href="{{ row.playlist_url }}" target="_blank" rel="noopener">Åpne ↗</a>
+            {% elif row.playlist_id %}
+            <span class="dim mono">{{ row.playlist_id }}</span>
+            {% else %}
+            <span class="dim">—</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state"><span class="emoji">🗂️</span>Synkroniser et Canvas-emne først.</div>
+  {% endif %}
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  async function connect(button) {
+    await withBusy(button, async function () {
+      const result = await api("/api/soundcloud/connect", { method: "POST" });
+      if (!result.ok) return toast(errorMessage(result, "Kunne ikke starte tilkobling."), "error");
+      window.location.href = result.data.authorize_url;
+    });
+  }
+
+  async function disconnect(button) {
+    const yes = await confirmDialog("Koble fra", "Lagret SoundCloud-token slettes.", "Koble fra");
+    if (!yes) return;
+    await withBusy(button, async function () {
+      await api("/api/soundcloud/disconnect", { method: "POST" });
+      location.reload();
+    });
+  }
+
+  function renderItems(items) {
+    if (!items || !items.length) return "";
+    const rows = items.map(function (item) {
+      const badge = item.status === "failed" ? "badge-error"
+        : item.status === "reused" ? "badge-muted" : "badge-ok";
+      return '<div class="cost-line"><span>' + (item.title || item.module_name) +
+        '</span><span><span class="badge ' + badge + '">' + item.status + "</span> " +
+        (item.message ? '<span class="dim">' + item.message + "</span>" : "") + "</span></div>";
+    });
+    return '<div class="cost-lines">' + rows.join("") + "</div>";
+  }
+
+  async function uploadAll(button) {
+    await withBusy(button, async function () {
+      const result = await api("/api/soundcloud/upload", { method: "POST", body: { page_ids: [], force: false } });
+      const box = document.getElementById("sc-result");
+      if (!result.ok && !result.data) return toast("Opplasting feilet.", "error");
+      toast(result.data.message || "Ferdig.", result.data.ok ? "ok" : "error");
+      box.innerHTML = renderItems(result.data.items);
+    });
+  }
+
+  async function syncPlaylists(button) {
+    await withBusy(button, async function () {
+      const result = await api("/api/soundcloud/sync-playlists", { method: "POST" });
+      const box = document.getElementById("sc-result");
+      if (!result.ok && !result.data) return toast("Synkronisering feilet.", "error");
+      toast(result.data.message || "Ferdig.", result.data.ok ? "ok" : "error");
+      box.innerHTML = renderItems(
+        (result.data.results || []).map(function (r) {
+          return { title: r.module_name, status: r.status, message: r.message };
+        })
+      );
+    });
+  }
+</script>
+{% endblock %}

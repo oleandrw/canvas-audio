@@ -1,0 +1,44 @@
+{# Polled fragment: live progress for the newest active job. #}
+<div id="job-progress"
+     {% if job and job.status in ("queued", "running") %}
+     hx-get="/fragments/job-progress"
+     hx-trigger="every 2s"
+     hx-swap="outerHTML"
+     {% endif %}>
+  {% if job %}
+  <div class="card">
+    <div class="progress-label">
+      <div>
+        <span class="progress-count">{{ job.processed_items }} / {{ job.total_items }} sider ferdig</span>
+        <span class="badge {{ 'badge-brand' if job.status in ('queued','running') else ('badge-error' if job.status in ('failed','completed_with_errors') else 'badge-ok') }}">{{ job.status_label }}</span>
+      </div>
+      <div class="dim">
+        {% if job.voice_name %}{{ job.voice_name }} · {% endif %}{{ job.tts_model or "—" }}
+        {% if job.ai_provider != "none" %} · AI: {{ job.ai_provider }}{% endif %}
+      </div>
+    </div>
+    <div class="progress">
+      <div class="progress-bar {{ 'is-danger' if job.failed_items else '' }}" style="width: {{ job.progress_percent }}%"></div>
+    </div>
+    <div class="row dim" style="margin-top: var(--space-3); font-size: 0.85rem;">
+      <span>✅ {{ job.completed_items }} ferdig</span>
+      <span>⏭️ {{ job.skipped_items }} hoppet over</span>
+      <span>{% if job.failed_items %}❌{% else %}·{% endif %} {{ job.failed_items }} feilet</span>
+      <span class="spacer">Estimert: ${{ "%.2f"|format(job.estimated_cost_usd) }}</span>
+      {% if job.status in ("queued", "running") %}
+      <button class="btn btn-ghost btn-sm" onclick="cancelJob({{ job.id }})">Avbryt</button>
+      {% endif %}
+    </div>
+    {% if job.error %}
+    <div class="alert alert-error" style="margin-top: var(--space-4); margin-bottom: 0;">
+      <span class="alert-icon">⚠️</span><div>{{ job.error }}</div>
+    </div>
+    {% endif %}
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <span class="emoji">💤</span>
+    Ingen jobb kjører nå.
+  </div>
+  {% endif %}
+</div>

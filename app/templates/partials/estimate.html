@@ -1,0 +1,129 @@
+{# Cost estimate panel. Always labelled as an estimate. #}
+<div class="grid grid-2">
+  <div>
+    <div class="cost-lines">
+      <div class="cost-line">
+        <span>Valgte sider</span>
+        <span class="cost-value">{{ estimate.page_count }}</span>
+      </div>
+      <div class="cost-line">
+        <span>Sider som faktisk genereres</span>
+        <span class="cost-value">{{ estimate.tts_page_count }}</span>
+      </div>
+      <div class="cost-line">
+        <span>Ord</span>
+        <span class="cost-value">{{ nb(estimate.total_words) }}</span>
+      </div>
+      <div class="cost-line">
+        <span>Tegn</span>
+        <span class="cost-value">{{ nb(estimate.total_characters) }}</span>
+      </div>
+      <div class="cost-line">
+        <span>Tegn til ElevenLabs</span>
+        <span class="cost-value">{{ nb(estimate.tts_characters) }}</span>
+      </div>
+      <div class="cost-line">
+        <span>AI-bearbeiding</span>
+        <span class="cost-value">
+          {% if estimate.ai_provider == "none" %}Ingen{% else %}{{ provider_label(estimate.ai_provider) }} — {{ estimate.ai_page_count }} sider{% endif %}
+        </span>
+      </div>
+      <div class="cost-line">
+        <span>ElevenLabs-modell</span>
+        <span class="cost-value">{{ estimate.tts_model or "— ikke valgt —" }}</span>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="cost-lines">
+      <div class="cost-line">
+        <span>ElevenLabs</span>
+        <span class="cost-value">ca. ${{ "%.2f"|format(estimate.elevenlabs_usd) }}</span>
+      </div>
+      {% if estimate.openai_usd %}
+      <div class="cost-line">
+        <span>OpenAI</span>
+        <span class="cost-value">ca. ${{ "%.2f"|format(estimate.openai_usd) }}</span>
+      </div>
+      {% endif %}
+      {% if estimate.anthropic_usd %}
+      <div class="cost-line">
+        <span>Anthropic</span>
+        <span class="cost-value">ca. ${{ "%.2f"|format(estimate.anthropic_usd) }}</span>
+      </div>
+      {% endif %}
+      <div class="cost-line total">
+        <span>Estimert total</span>
+        <span class="cost-value">
+          ca. ${{ "%.2f"|format(estimate.total_usd) }}
+          <span class="dim" style="font-weight: 400;">
+            (≈ {{ "%.2f"|format(estimate.total_local) }} {{ estimate.currency_code }})
+          </span>
+        </span>
+      </div>
+    </div>
+
+    {% if estimate.savings_usd > 0.004 %}
+    <div class="alert alert-ok" style="margin-top: var(--space-4); margin-bottom: 0;">
+      <span class="alert-icon">💡</span>
+      <div>
+        Ved å generere bare manglende og endrede sider sparer du anslagsvis
+        <strong>${{ "%.2f"|format(estimate.savings_usd) }}</strong>
+        sammenlignet med å regenerere alt (${{ "%.2f"|format(estimate.full_regeneration_usd) }}).
+      </div>
+    </div>
+    {% endif %}
+
+    {% if estimate.exceeds_budget %}
+    <div class="alert alert-warn" style="margin-top: var(--space-4); margin-bottom: 0;">
+      <span class="alert-icon">⚠️</span>
+      <div>
+        Jobben vil bringe forbruket denne måneden til
+        ${{ "%.2f"|format(estimate.spent_this_month_usd + estimate.total_usd) }}
+        av budsjettet på ${{ "%.2f"|format(estimate.budget_usd) }}.
+      </div>
+    </div>
+    {% elif estimate.requires_confirmation %}
+    <div class="alert alert-info" style="margin-top: var(--space-4); margin-bottom: 0;">
+      <span class="alert-icon">ℹ️</span>
+      <div>Over bekreftelsesgrensen på ${{ "%.2f"|format(estimate.threshold_usd) }} — du må bekrefte før start.</div>
+    </div>
+    {% endif %}
+
+    {% if not tts_ready %}
+    <div class="alert alert-warn" style="margin-top: var(--space-4); margin-bottom: 0;">
+      <span class="alert-icon">🎙️</span>
+      <div>Velg ElevenLabs-stemme og -modell før du kan generere.</div>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+{% if estimate.pages %}
+<details style="margin-top: var(--space-5);">
+  <summary class="muted" style="cursor: pointer;">Kostnad per side ({{ estimate.pages|length }})</summary>
+  <div class="table-wrap" style="margin-top: var(--space-3);">
+    <table>
+      <thead>
+        <tr>
+          <th>Side</th><th>Modul</th><th class="right">Tegn</th>
+          <th>AI</th><th>TTS-modell</th><th class="right">Estimert</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for page in estimate.pages|sort(attribute="total_usd", reverse=true) %}
+        <tr>
+          <td>{{ page.title }}</td>
+          <td class="dim">{{ page.module_name }}</td>
+          <td class="right">{{ nb(page.characters) }}</td>
+          <td class="dim">{{ provider_label(page.ai_provider) if page.needs_ai else "—" }}</td>
+          <td class="dim">{{ page.tts_model if page.needs_tts else "—" }}</td>
+          <td class="right">{{ "$%.4f"|format(page.total_usd) if page.total_usd else "—" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</details>
+{% endif %}

@@ -1,0 +1,9 @@
+{# Wrapper so htmx can swap the whole table (outerHTML) while a job is running. #}
+<div class="table-wrap" id="generation-table"
+     {% if job and job.status in ("queued", "running") %}
+     hx-get="/fragments/generation-rows{% if job %}?jobb={{ job.id }}{% endif %}"
+     hx-trigger="every 3s"
+     hx-swap="outerHTML"
+     {% endif %}>
+  {% include "partials/generation_rows.html" %}
+</div>

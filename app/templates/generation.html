@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}Generering · Canvas → Lyd{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1>🎧 Generering</h1>
+    <p class="subtitle">
+      Status per side. Feil på én side stopper ikke køen — bruk «Prøv igjen» på radene som feilet.
+    </p>
+  </div>
+  <div class="page-header-actions">
+    <a class="btn btn-ghost" href="/canvas">🎓 Velg sider</a>
+    {% if job and job.failed_items %}
+    <button class="btn btn-primary" onclick="retryFailed({{ job.id }}, this)">♻️ Prøv feilede på nytt</button>
+    {% endif %}
+  </div>
+</div>
+
+<section class="section">
+  {% include "partials/job_progress.html" %}
+</section>
+
+{% if jobs %}
+<section class="section">
+  <div class="section-title">Jobber</div>
+  <div class="btn-row">
+    {% for item in jobs %}
+    <a class="btn btn-sm {{ 'btn-primary' if job and item.id == job.id else 'btn-ghost' }}"
+       href="/generering?jobb={{ item.id }}">
+      #{{ item.id }} · {{ item.status_label }} · {{ item.total_items }} sider
+    </a>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+<section class="section">
+  <div class="section-title">Sider</div>
+  {% if rows %}
+  {% include "partials/generation_table.html" %}
+  {% else %}
+  <div class="empty-state">
+    <span class="emoji">📄</span>
+    <p>Ingen sider å vise. Synkroniser et emne og velg sider under Canvas.</p>
+    <a class="btn btn-primary" href="/canvas">Gå til Canvas</a>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  async function retryPage(id, button) {
+    await withBusy(button, async function () {
+      const result = await api("/api/pages/" + id + "/retry", { method: "POST" });
+      toast(result.ok ? "Startet på nytt." : errorMessage(result, "Kunne ikke starte."),
+            result.ok ? "ok" : "error");
+    });
+  }
+
+  async function retryFailed(jobId, button) {
+    await withBusy(button, async function () {
+      const result = await api("/api/generation/" + jobId + "/retry-failed", { method: "POST" });
+      if (!result.ok) return toast(errorMessage(result, "Kunne ikke starte på nytt."), "error");
+      toast(result.data.message, "ok");
+      setTimeout(function () { location.href = "/generering?jobb=" + result.data.job_id; }, 800);
+    });
+  }
+
+  async function cancelJob(id) {
+    const result = await api("/api/generation/" + id + "/cancel", { method: "POST" });
+    toast(result.ok ? (result.data.message || "Avbryter…") : errorMessage(result, "Kunne ikke avbryte."),
+          result.ok ? "ok" : "error");
+  }
+</script>
+{% endblock %}

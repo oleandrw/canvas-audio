@@ -1,0 +1,374 @@
+{% extends "base.html" %}
+{% from "partials/macros.html" import secret_field with context %}
+{% block title %}Innstillinger · Canvas → Lyd{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1>⚙️ Innstillinger</h1>
+    <p class="subtitle">
+      Nøkler lagres på serveren, aldri i databasen og aldri i Git. Feltene under viser
+      bare en maskert variant — den fulle nøkkelen sendes aldri tilbake til nettleseren.
+    </p>
+  </div>
+</div>
+
+{% if env_locked_keys %}
+<div class="alert alert-info">
+  <span class="alert-icon">🔒</span>
+  <div>
+    Disse verdiene kommer fra miljøvariabler og kan ikke endres herfra
+    (som det skal være på en server): <strong>{{ env_locked_keys|join(", ") }}</strong>.
+  </div>
+</div>
+{% endif %}
+
+<section class="section">
+  <div class="card">
+    <div class="card-header">
+      <h2>🎓 Canvas</h2>
+      <span class="spacer" id="test-canvas-result"></span>
+    </div>
+    <div class="field">
+      <label for="canvas_url">Canvas-URL</label>
+      <input type="url" id="canvas_url" value="{{ status.canvas_url }}"
+             placeholder="https://skolen.instructure.com" {{ "disabled" if locked("CANVAS_URL") }}>
+      <p class="field-hint">Basis-URL uten <code>/api/v1</code>.</p>
+    </div>
+    {{ secret_field("canvas_token", "CANVAS_TOKEN") }}
+    <div class="btn-row">
+      <button class="btn btn-ghost" onclick="testProvider('canvas', this)">🔌 Test Canvas</button>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="card">
+    <div class="card-header">
+      <h2>🎙️ ElevenLabs</h2>
+      <span class="spacer" id="test-elevenlabs-result"></span>
+    </div>
+    {{ secret_field("elevenlabs_api_key", "ELEVENLABS_API_KEY") }}
+
+    <div class="field-row">
+      <div class="field">
+        <label for="elevenlabs_voice_id">Stemme</label>
+        <select id="elevenlabs_voice_id">
+          <option value="">— ikke valgt —</option>
+          {% if prefs.voice_id %}
+          <option value="{{ prefs.voice_id }}" selected>{{ prefs.voice_name or prefs.voice_id }}</option>
+          {% endif %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="elevenlabs_model_id">Modell</label>
+        <select id="elevenlabs_model_id">
+          <option value="">— ikke valgt —</option>
+          {% if prefs.tts_model_id %}
+          <option value="{{ prefs.tts_model_id }}" selected>{{ prefs.tts_model_id }}</option>
+          {% endif %}
+        </select>
+        <p class="field-hint">
+          Ingen standardmodell — du må velge bevisst. Pris varierer:
+          v3/multilingual_v2 ca. $0,10 per 1000 tegn, Flash/Turbo ca. $0,05.
+        </p>
+      </div>
+    </div>
+
+    <div class="field-row">
+      <div class="field">
+        <label for="voice_stability">Stabilitet <span class="dim" id="voice_stability_out">{{ prefs.voice_settings.stability }}</span></label>
+        <input type="range" id="voice_stability" min="0" max="1" step="0.05" value="{{ prefs.voice_settings.stability }}">
+      </div>
+      <div class="field">
+        <label for="voice_similarity_boost">Likhet <span class="dim" id="voice_similarity_boost_out">{{ prefs.voice_settings.similarity_boost }}</span></label>
+        <input type="range" id="voice_similarity_boost" min="0" max="1" step="0.05" value="{{ prefs.voice_settings.similarity_boost }}">
+      </div>
+      <div class="field">
+        <label for="voice_style">Stil <span class="dim" id="voice_style_out">{{ prefs.voice_settings.style }}</span></label>
+        <input type="range" id="voice_style" min="0" max="1" step="0.05" value="{{ prefs.voice_settings.style }}">
+      </div>
+      <div class="field">
+        <label for="voice_speed">Hastighet <span class="dim" id="voice_speed_out">{{ prefs.voice_settings.speed }}</span></label>
+        <input type="range" id="voice_speed" min="0.5" max="2" step="0.05" value="{{ prefs.voice_settings.speed }}">
+      </div>
+    </div>
+    <div class="inline-field field">
+      <input type="checkbox" id="voice_use_speaker_boost" {{ "checked" if prefs.voice_settings.use_speaker_boost }}>
+      <label for="voice_use_speaker_boost">Speaker boost</label>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn btn-ghost" onclick="testProvider('elevenlabs', this)">🔌 Test ElevenLabs</button>
+      <button class="btn btn-ghost" onclick="loadVoices(this)">🎙️ Hent stemmer og modeller</button>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="card">
+    <div class="card-header">
+      <h2>✨ AI-bearbeiding</h2>
+      <span class="spacer" id="test-openai-result"></span>
+      <span id="test-anthropic-result"></span>
+    </div>
+    <p class="muted">
+      Valgfritt. Standard er <strong>Ingen AI</strong> — da leses den rensede Canvas-teksten opp direkte.
+      Instruksjonen som brukes ligger i <code>app/services/prompts.py</code>.
+    </p>
+
+    <div class="field-row">
+      <div class="field">
+        <label for="ai_provider">Leverandør</label>
+        <select id="ai_provider" onchange="fillModels()">
+          <option value="none" {{ "selected" if prefs.ai_provider == "none" }}>Ingen AI (standard)</option>
+          <option value="openai" {{ "selected" if prefs.ai_provider == "openai" }}>OpenAI</option>
+          <option value="anthropic" {{ "selected" if prefs.ai_provider == "anthropic" }}>Anthropic</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="ai_model">Modell</label>
+        <select id="ai_model"></select>
+        <p class="field-hint">Priser hentes fra <code>pricing.toml</code> og kan redigeres der.</p>
+      </div>
+    </div>
+
+    {{ secret_field("openai_api_key", "OPENAI_API_KEY") }}
+    {{ secret_field("anthropic_api_key", "ANTHROPIC_API_KEY") }}
+
+    <div class="btn-row">
+      <button class="btn btn-ghost" onclick="testProvider('openai', this)">🔌 Test OpenAI</button>
+      <button class="btn btn-ghost" onclick="testProvider('anthropic', this)">🔌 Test Anthropic</button>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="card">
+    <div class="card-header">
+      <h2>☁️ SoundCloud</h2>
+      <span class="spacer" id="test-soundcloud-result"></span>
+    </div>
+    <p class="muted">
+      Valgfritt. Krever Artist Pro-abonnement og manuelt godkjent API-applikasjon.
+    </p>
+    <div class="field">
+      <label for="soundcloud_client_id">Client ID</label>
+      <input type="text" id="soundcloud_client_id" value="{{ status.soundcloud_client_id }}"
+             {{ "disabled" if locked("SOUNDCLOUD_CLIENT_ID") }}>
+    </div>
+    {{ secret_field("soundcloud_client_secret", "SOUNDCLOUD_CLIENT_SECRET") }}
+    <div class="field">
+      <label for="soundcloud_redirect_uri">Redirect URI</label>
+      <input type="text" id="soundcloud_redirect_uri" value="{{ status.soundcloud_redirect_uri }}"
+             {{ "disabled" if locked("SOUNDCLOUD_REDIRECT_URI") }}>
+      <p class="field-hint">Må være nøyaktig den samme som er registrert hos SoundCloud.</p>
+    </div>
+    <div class="field">
+      <label for="soundcloud_sharing">Deling for nye spor</label>
+      <select id="soundcloud_sharing">
+        <option value="private" {{ "selected" if prefs.soundcloud_sharing == "private" }}>Privat (anbefalt)</option>
+        <option value="public" {{ "selected" if prefs.soundcloud_sharing == "public" }}>Offentlig</option>
+      </select>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-ghost" onclick="testProvider('soundcloud', this)">🔌 Test SoundCloud</button>
+      <a class="btn btn-ghost" href="/soundcloud">Åpne SoundCloud-siden</a>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="card">
+    <div class="card-header"><h2>🧩 Applikasjon</h2></div>
+
+    <div class="field-row">
+      <div class="field">
+        <label for="monthly_budget_usd">Månedlig budsjett (USD)</label>
+        <input type="number" id="monthly_budget_usd" min="0" step="1" value="{{ prefs.monthly_budget_usd }}">
+        <p class="field-hint">0 slår av budsjettvarselet.</p>
+      </div>
+      <div class="field">
+        <label for="cost_confirm_threshold_usd">Bekreftelsesgrense (USD)</label>
+        <input type="number" id="cost_confirm_threshold_usd" min="0" step="1" value="{{ prefs.cost_confirm_threshold_usd }}">
+        <p class="field-hint">Jobber over denne summen krever en ekstra bekreftelse.</p>
+      </div>
+      <div class="field">
+        <label for="filename_style">Filnavnstil</label>
+        <select id="filename_style">
+          <option value="slug" {{ "selected" if prefs.filename_style == "slug" }}>01-introduksjon-til-ki.mp3</option>
+          <option value="title" {{ "selected" if prefs.filename_style == "title" }}>01 - Introduksjon til KI.mp3</option>
+        </select>
+      </div>
+    </div>
+
+    {{ secret_field("app_password", "APP_PASSWORD", "Settes den, kreves innlogging for hele applikasjonen.") }}
+
+    <div class="alert {{ 'alert-ok' if status.env_file_writable else 'alert-warn' }}" style="margin-bottom: 0;">
+      <span class="alert-icon">{{ "💾" if status.env_file_writable else "🔒" }}</span>
+      <div>
+        {% if status.env_file_writable %}
+        Endringer skrives til <code>.env</code> i prosjektmappa. Det er ment for lokal eller privat
+        drift — på server bør du bruke vanlige miljøvariabler, som da overstyrer filen.
+        {% else %}
+        <code>.env</code> kan ikke skrives her. Bruk miljøvariabler i stedet.
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="btn-row" style="position: sticky; bottom: var(--space-4);">
+  <button class="btn btn-primary" onclick="saveAll(this)">💾 Lagre innstillinger</button>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const AI_MODELS = {{ ai_models_json|safe }};
+  const CURRENT_AI_MODEL = {{ prefs.ai_model|tojson }};
+
+  function fillModels() {
+    const provider = document.getElementById("ai_provider").value;
+    const select = document.getElementById("ai_model");
+    const models = AI_MODELS[provider] || [];
+    select.innerHTML = "";
+    if (!models.length) {
+      select.innerHTML = '<option value="">— ikke relevant —</option>';
+      select.disabled = true;
+      return;
+    }
+    select.disabled = false;
+    models.forEach(function (m) {
+      const option = document.createElement("option");
+      option.value = m.id;
+      option.textContent = m.label + " (" + m.price + ")";
+      if (m.id === CURRENT_AI_MODEL) option.selected = true;
+      select.appendChild(option);
+    });
+  }
+
+  function bindRange(id) {
+    const input = document.getElementById(id);
+    const out = document.getElementById(id + "_out");
+    if (!input || !out) return;
+    input.addEventListener("input", function () { out.textContent = input.value; });
+  }
+
+  function value(id) {
+    const el = document.getElementById(id);
+    if (!el || el.disabled) return undefined;
+    if (el.type === "checkbox") return el.checked;
+    const v = el.value.trim();
+    return v === "" ? undefined : v;
+  }
+
+  function secretValue(id) {
+    // Only send a secret when the user actually typed a new one.
+    const el = document.getElementById(id);
+    if (!el || el.disabled || !el.dataset.dirty) return undefined;
+    return el.value;
+  }
+
+  async function saveAll(button) {
+    const payload = {
+      canvas_url: value("canvas_url"),
+      canvas_token: secretValue("canvas_token"),
+      elevenlabs_api_key: secretValue("elevenlabs_api_key"),
+      openai_api_key: secretValue("openai_api_key"),
+      anthropic_api_key: secretValue("anthropic_api_key"),
+      soundcloud_client_id: value("soundcloud_client_id"),
+      soundcloud_client_secret: secretValue("soundcloud_client_secret"),
+      soundcloud_redirect_uri: value("soundcloud_redirect_uri"),
+      app_password: secretValue("app_password"),
+
+      ai_provider: value("ai_provider"),
+      ai_model: value("ai_model"),
+      elevenlabs_voice_id: value("elevenlabs_voice_id") || "",
+      elevenlabs_voice_name: (function () {
+        const s = document.getElementById("elevenlabs_voice_id");
+        const opt = s.options[s.selectedIndex];
+        return opt && opt.value ? opt.textContent.split(" · ")[0] : "";
+      })(),
+      elevenlabs_model_id: value("elevenlabs_model_id") || "",
+      voice_stability: Number(document.getElementById("voice_stability").value),
+      voice_similarity_boost: Number(document.getElementById("voice_similarity_boost").value),
+      voice_style: Number(document.getElementById("voice_style").value),
+      voice_speed: Number(document.getElementById("voice_speed").value),
+      voice_use_speaker_boost: document.getElementById("voice_use_speaker_boost").checked,
+
+      monthly_budget_usd: Number(document.getElementById("monthly_budget_usd").value || 0),
+      cost_confirm_threshold_usd: Number(document.getElementById("cost_confirm_threshold_usd").value || 0),
+      filename_style: value("filename_style"),
+      soundcloud_sharing: value("soundcloud_sharing"),
+    };
+
+    Object.keys(payload).forEach(function (key) {
+      if (payload[key] === undefined) delete payload[key];
+    });
+
+    await withBusy(button, async function () {
+      const result = await api("/api/settings", { method: "POST", body: payload });
+      if (!result.ok) return toast(errorMessage(result, "Kunne ikke lagre."), "error");
+      toast(result.data.message, "ok");
+      setTimeout(function () { location.reload(); }, 1200);
+    });
+  }
+
+  async function testProvider(provider, button) {
+    const box = document.getElementById("test-" + provider + "-result");
+    await withBusy(button, async function () {
+      const result = await api("/api/settings/test/" + provider, { method: "POST" });
+      const data = result.data || {};
+      const ok = result.ok && data.ok;
+      if (box) {
+        box.innerHTML = '<span class="badge ' + (ok ? "badge-ok" : "badge-error") + '">' +
+          (ok ? "✓ " : "✕ ") + (data.detail || errorMessage(result, "Ukjent feil")) + "</span>";
+      }
+      toast(data.detail || errorMessage(result, "Tilkobling feilet."), ok ? "ok" : "error");
+    });
+  }
+
+  async function loadVoices(button) {
+    await withBusy(button, async function () {
+      const [voices, models] = await Promise.all([
+        api("/api/elevenlabs/voices"),
+        api("/api/elevenlabs/models"),
+      ]);
+      if (!voices.ok) return toast(errorMessage(voices, "Kunne ikke hente stemmer."), "error");
+      const voiceSelect = document.getElementById("elevenlabs_voice_id");
+      const current = voiceSelect.value;
+      voiceSelect.innerHTML = '<option value="">— ikke valgt —</option>';
+      voices.data.forEach(function (v) {
+        const option = document.createElement("option");
+        option.value = v.voice_id;
+        option.textContent = v.name + (v.category ? " · " + v.category : "");
+        if (v.voice_id === current) option.selected = true;
+        voiceSelect.appendChild(option);
+      });
+
+      if (models.ok) {
+        const modelSelect = document.getElementById("elevenlabs_model_id");
+        const currentModel = modelSelect.value;
+        modelSelect.innerHTML = '<option value="">— ikke valgt —</option>';
+        models.data.forEach(function (m) {
+          const option = document.createElement("option");
+          option.value = m.model_id;
+          option.textContent = m.name;
+          if (m.model_id === currentModel) option.selected = true;
+          modelSelect.appendChild(option);
+        });
+      }
+      toast("Hentet " + voices.data.length + " stemmer.", "ok");
+    });
+  }
+
+  document.addEventListener("DOMContentLoaded", function () {
+    fillModels();
+    ["voice_stability", "voice_similarity_boost", "voice_style", "voice_speed"].forEach(bindRange);
+    document.querySelectorAll('input[type="password"]').forEach(function (el) {
+      el.addEventListener("input", function () { el.dataset.dirty = "1"; });
+    });
+  });
+</script>
+{% endblock %}

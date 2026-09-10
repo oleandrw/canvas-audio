@@ -1,0 +1,200 @@
+{% extends "base.html" %}
+{% block title %}Oversikt · Canvas → Lyd{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1>📊 Oversikt</h1>
+    <p class="subtitle">
+      Status for det valgte Canvas-emnet, framdrift på lydgenerering og faktisk forbruk.
+    </p>
+  </div>
+  <div class="page-header-actions">
+    <a class="btn btn-ghost" href="/canvas">🎓 Gå til Canvas</a>
+    {% if course %}<a class="btn btn-primary" href="/generering">🎧 Generering</a>{% endif %}
+  </div>
+</div>
+
+{% if not credentials_ok %}
+<div class="alert alert-warn">
+  <span class="alert-icon">🔑</span>
+  <div>
+    <strong>Mangler oppsett.</strong>
+    {{ missing_summary }} Legg dem inn under <a href="/innstillinger">Innstillinger</a> og test tilkoblingen.
+  </div>
+</div>
+{% endif %}
+
+{% if not course %}
+<div class="empty-state">
+  <span class="emoji">🎓</span>
+  <p>Ingen emne er synkronisert ennå.</p>
+  <a class="btn btn-primary" href="/canvas">Velg og synkroniser et emne</a>
+</div>
+{% else %}
+
+<section class="section">
+  <div class="grid grid-4">
+    <div class="stat">
+      <div class="stat-label"><span>🎓</span> Emne</div>
+      <div class="stat-value" style="font-size: 1.15rem; line-height: 1.35;">{{ course.name }}</div>
+      <div class="stat-meta">
+        Canvas-ID {{ course.canvas_course_id }}
+        {% if course.synced_at %} · synkronisert {{ course.synced_at.strftime("%d.%m.%Y %H:%M") }}{% endif %}
+      </div>
+    </div>
+    <div class="stat">
+      <div class="stat-label"><span>🗂️</span> Moduler</div>
+      <div class="stat-value">{{ stats.modules }}</div>
+      <div class="stat-meta">{{ stats.pages }} sider totalt</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label"><span>🔊</span> Genererte lydfiler</div>
+      <div class="stat-value">{{ stats.generated }}</div>
+      <div class="stat-meta">{{ stats.total_duration_label }} lyd · {{ stats.total_size_label }}</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label"><span>⏳</span> Gjenstår</div>
+      <div class="stat-value">{{ stats.remaining }}</div>
+      <div class="stat-meta">
+        {{ stats.not_generated }} ikke generert · {{ stats.changed }} endret
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="section-title">Framdrift</div>
+  {% include "partials/job_progress.html" %}
+</section>
+
+<section class="section">
+  <div class="section-title">Forbruk og kostnad</div>
+  <div class="grid grid-3">
+    <div class="card">
+      <div class="card-header"><h3>Denne måneden</h3></div>
+      <div class="stat-value">${{ "%.2f"|format(usage.this_month.total_usd) }}</div>
+      <div class="stat-meta">
+        ≈ {{ "%.2f"|format(usage.this_month.total_local) }} {{ usage.this_month.currency_code }}
+      </div>
+      {% if usage.budget_usd %}
+      <div style="margin-top: var(--space-4);">
+        <div class="progress-label">
+          <span class="dim">Budsjett</span>
+          <span class="dim">${{ "%.2f"|format(usage.this_month.total_usd) }} / ${{ "%.2f"|format(usage.budget_usd) }}</span>
+        </div>
+        <div class="progress">
+          <div class="progress-bar {{ 'is-danger' if usage.budget_used_percent >= 100 else ('is-warn' if usage.budget_used_percent >= 80 else '') }}"
+               style="width: {{ [usage.budget_used_percent, 100]|min }}%"></div>
+        </div>
+      </div>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <div class="card-header"><h3>Totalt</h3></div>
+      <div class="stat-value">${{ "%.2f"|format(usage.all_time.total_usd) }}</div>
+      <div class="stat-meta">Siden applikasjonen ble tatt i bruk</div>
+      <div class="cost-lines" style="margin-top: var(--space-4);">
+        {% for provider in usage.all_time.providers %}
+        <div class="cost-line">
+          <span>{{ provider_label(provider.provider) }}</span>
+          <span class="cost-value">${{ "%.2f"|format(provider.cost_usd) }}</span>
+        </div>
+        {% else %}
+        <div class="dim">Ingen betalte kall registrert ennå.</div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><h3>☁️ SoundCloud</h3></div>
+      {% if soundcloud.connected %}
+      <span class="badge badge-ok">Tilkoblet{% if soundcloud.account_name %} som {{ soundcloud.account_name }}{% endif %}</span>
+      <div class="cost-lines" style="margin-top: var(--space-4);">
+        <div class="cost-line"><span>Opplastede spor</span><span class="cost-value">{{ soundcloud.track_count }}</span></div>
+        <div class="cost-line"><span>Spillelister</span><span class="cost-value">{{ soundcloud.playlist_count }}</span></div>
+      </div>
+      {% elif soundcloud.configured %}
+      <span class="badge badge-warn">Ikke tilkoblet</span>
+      <p class="field-hint">{{ soundcloud.detail }}</p>
+      <a class="btn btn-ghost btn-sm" href="/soundcloud">Åpne SoundCloud</a>
+      {% else %}
+      <span class="badge badge-muted">Ikke konfigurert</span>
+      <p class="field-hint">Valgfri integrasjon. Resten av applikasjonen fungerer uten den.</p>
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+{% if failed_pages %}
+<section class="section">
+  <div class="section-title">Feil</div>
+  <div class="card">
+    <div class="stack">
+      {% for page in failed_pages %}
+      <div class="row">
+        <a href="/side/{{ page.id }}">{{ page.title }}</a>
+        <span class="dim">{{ page.last_error }}</span>
+        <button class="btn btn-ghost btn-sm spacer" onclick="retryPage({{ page.id }}, this)">Prøv igjen</button>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+{% endif %}
+
+<section class="section">
+  <div class="section-title">Nylige jobber</div>
+  {% if jobs %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Jobb</th><th>Status</th><th>Sider</th><th>Stemme</th>
+          <th>AI</th><th class="right">Estimert</th><th>Startet</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for job in jobs %}
+        <tr>
+          <td><a href="/generering?jobb={{ job.id }}">#{{ job.id }}</a></td>
+          <td><span class="badge {{ job_badge(job.status) }}">{{ job.status_label }}</span></td>
+          <td>{{ job.completed_items }}/{{ job.total_items }}</td>
+          <td>{{ job.voice_name or "—" }}</td>
+          <td>{{ provider_label(job.ai_provider) }}</td>
+          <td class="right">${{ "%.2f"|format(job.estimated_cost_usd) }}</td>
+          <td class="dim nowrap">{{ job.created_at.strftime("%d.%m %H:%M") if job.created_at else "—" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state"><span class="emoji">🗒️</span>Ingen jobber kjørt ennå.</div>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+  async function cancelJob(id) {
+    const result = await api("/api/generation/" + id + "/cancel", { method: "POST" });
+    toast(result.ok ? (result.data.message || "Avbryter…") : errorMessage(result, "Kunne ikke avbryte."),
+          result.ok ? "ok" : "error");
+  }
+
+  async function retryPage(id, button) {
+    await withBusy(button, async function () {
+      const result = await api("/api/pages/" + id + "/retry", { method: "POST" });
+      if (result.ok) {
+        toast("Prøver siden på nytt.", "ok");
+        setTimeout(function () { location.reload(); }, 900);
+      } else {
+        toast(errorMessage(result, "Kunne ikke starte på nytt."), "error");
+      }
+    });
+  }
+</script>
+{% endblock %}

@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Logg inn · Canvas → Lyd{% endblock %}
+
+{% block content %}
+<div style="max-width: 380px; margin: 8vh auto 0;">
+  <div class="card">
+    <div class="card-header">
+      <span class="brand-mark">🎧</span>
+      <h2>Canvas → Lyd</h2>
+    </div>
+    <p class="muted">Applikasjonen er passordbeskyttet.</p>
+
+    {% if error %}
+    <div class="alert alert-error"><span class="alert-icon">⚠️</span><div>{{ error }}</div></div>
+    {% endif %}
+
+    <form method="post" action="/logg-inn">
+      <div class="field">
+        <label for="password">Passord</label>
+        <input type="password" id="password" name="password" autocomplete="current-password" autofocus required>
+      </div>
+      <button class="btn btn-primary" type="submit" style="width: 100%;">Logg inn</button>
+    </form>
+  </div>
+</div>
+{% endblock %}
