@@ -276,6 +276,11 @@ async def sync_course(
             )
         )
 
+    # Pages that were not refetched still get the current cleaner applied.
+    refetched = {page_pk for page_pk, _url, _updated in needs_body}
+    result.changed_pages += await run_db(
+        lambda session: _reclean_stored_pages(session, course_pk, refetched)
+    )
     result.unchanged_pages = max(result.pages - result.changed_pages, 0)
     logger.info("Canvas sync finished %s", result.as_message())
     return result
@@ -285,6 +290,29 @@ def _record_page_error(session: Session, page_pk: int, message: str) -> None:
     page = session.get(Page, page_pk)
     if page is not None:
         page.last_error = message[:1000]
+
+
+def _reclean_stored_pages(session: Session, course_pk: int, skip_ids: set[int]) -> int:
+    """Re-run the cleaner on stored HTML for pages that were not refetched.
+
+    Keeps stored text in step with improvements to the cleaner, such as new
+    punctuation rules, without another Canvas call. Returns how many pages'
+    text actually changed.
+    """
+    changed = 0
+    pages = session.execute(
+        select(Page).where(Page.course_id == course_pk, Page.archived.is_(False))
+    ).scalars()
+    for page in pages:
+        if page.id in skip_ids or not page.html:
+            continue
+        text = html_to_text(page.html)
+        if text != page.original_text:
+            page.original_text = text
+            page.original_hash = text_hash(text)
+            changed += 1
+    session.flush()
+    return changed
 
 
 def refresh_page_body(session: Session, page: Page, body: CanvasPageBody) -> bool:

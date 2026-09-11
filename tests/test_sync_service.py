@@ -15,8 +15,9 @@ from sqlalchemy import select
 
 from app.database import session_scope
 from app.models.core import Course, GeneratedAudio, Module, Page, PageAudioStatus
-from app.services.hashing import page_audio_status
+from app.services.hashing import page_audio_status, text_hash
 from app.services.sync_service import course_structure, sync_course
+from app.services.text_service import html_to_text
 from tests.conftest import attach_audio
 
 COURSE = {"id": 4711, "name": "Kunstig intelligens", "course_code": "KI-101"}
@@ -281,3 +282,21 @@ class TestSyncEndpoint:
 
     def test_empty_course_id_is_rejected(self, client) -> None:
         assert client.post("/api/canvas/sync", json={"course_id": "  "}).status_code == 422
+
+
+class TestRecleanOnSync:
+    async def test_resync_applies_the_current_cleaner_to_stored_pages(self, env: Path) -> None:
+        await run_sync()
+        with session_scope() as session:
+            page = session.scalar(select(Page).where(Page.title == "Velkommen"))
+            # What an older version of the cleaner could have left behind.
+            page.original_text = "Velkommen\n\nHei og velkommen til emnet"
+            page.original_hash = text_hash(page.original_text)
+
+        result = await run_sync()
+        assert result.changed_pages == 1
+
+        with session_scope() as session:
+            page = session.scalar(select(Page).where(Page.title == "Velkommen"))
+            assert page.original_text == html_to_text(page.html)
+            assert page.original_hash == text_hash(page.original_text)

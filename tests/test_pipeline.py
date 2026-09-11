@@ -378,3 +378,36 @@ class TestCancellation:
             job = session.get(GenerationJob, job_id)
             assert job.status == JobStatus.CANCELLED
             assert all(item.status == ItemStatus.SKIPPED for item in job.items)
+
+
+class TestAIPunctuation:
+    async def test_ai_lines_get_endings_before_they_are_spoken(
+        self, env: Path, course_with_pages: dict[str, Any], db: Session, monkeypatch
+    ) -> None:
+        from app.services import openai_service
+
+        async def fake_process(text: str, *, title: str, model: str, api_key: str, **_kw: Any):
+            return AIResult(
+                text="Første del\nAndre del,",
+                input_tokens=10,
+                output_tokens=10,
+                model=model,
+                provider="openai",
+            )
+
+        monkeypatch.setattr(openai_service, "process_text", fake_process)
+        page = course_with_pages["pages"][1]
+        kwargs = {"ai_provider": AIProvider.OPENAI, "ai_model": "gpt-5.6-terra"}
+
+        first = FakeElevenLabs()
+        await run_job(build_job(db, [page], **kwargs), tts_client=first)
+        assert [c["text"] for c in first.calls] == ["Første del.\nAndre del."]
+
+        with session_scope() as session:
+            assert session.get(Page, page.id).processed_text == "Første del.\nAndre del."
+
+        # Stored text and spoken text are identical, so the next run neither
+        # regenerates the audio nor pays for it again.
+        second = FakeElevenLabs()
+        await run_job(build_job(db, [page], **kwargs), tts_client=second)
+        assert second.calls == []

@@ -35,7 +35,11 @@ from app.services.audio_service import build_relative_path, write_audio
 from app.services.errors import InvalidContentError, ServiceError
 from app.services.hashing import ai_result_is_reusable, audio_is_current, text_hash
 from app.services.prompts import PROMPT_VERSION
-from app.services.text_service import ensure_plain_text, html_to_text
+from app.services.text_service import (
+    ensure_plain_text,
+    ensure_sentence_endings,
+    html_to_text,
+)
 
 logger = get_logger("app.jobs.pipeline")
 
@@ -208,6 +212,7 @@ def store_ai_result(
     page = session.get(Page, page_id)
     if page is None:
         return
+    text = ensure_sentence_endings(text)
     page.processed_text = text
     page.processed_hash = text_hash(text)
     page.processed_by = provider
@@ -351,12 +356,12 @@ async def process_item(
                 lambda session: set_item_status(session, item_id, ItemStatus.AI_PROCESSING)
             )
             result = await _run_ai(work, config)
-            text_for_tts = result.text
+            text_for_tts = ensure_sentence_endings(result.text)
             await run_db(
                 lambda session: store_ai_result(
                     session,
                     work.page_id,
-                    text=result.text,
+                    text=text_for_tts,
                     provider=result.provider,
                     model=result.model,
                     source_hash=work.original_hash,
