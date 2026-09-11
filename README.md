@@ -140,20 +140,51 @@ app/
 
 ## Installasjon
 
+Du trenger Python 3.11 eller nyere. Last det ned fra
+<https://www.python.org/downloads/> og huk av for «Add python.exe to PATH» under
+installasjonen. `python --version` viser hvilken versjon du har.
+
+Hent koden:
+
 ```bash
 git clone https://github.com/oleandrw/canvas-audio.git
-cd canvas-audio
 ```
 
-### Oppsett av Python
+Repoet er privat, så kloning krever at du er innlogget, for eksempel med
+`gh auth login` eller Git Credential Manager.
 
-Windows (PowerShell):
+### Windows: med dobbeltklikk (anbefalt)
+
+1. Dobbeltklikk `install.bat` i prosjektmappa. Den lager det virtuelle miljøet
+   (`.venv`), installerer appen og spør om du vil ha et ikon på skrivebordet.
+   Første gang tar det noen minutter.
+2. Dobbeltklikk `start.bat` (eller ikonet). Appen åpner seg i nettleseren.
+3. Legg inn Canvas- og ElevenLabs-nøklene under ⚙️ Innstillinger.
+
+`install.bat` kan kjøres på nytt når som helst, for eksempel etter en
+`git pull`. En `.venv` som finnes fra før gjenbrukes. Den kjører ingen
+PowerShell-skript som krever endret execution policy.
+
+For utvikling, med test- og lintverktøyene i tillegg:
+
+```bash
+install.bat --dev
+```
+
+### Manuelt
+
+Windows (PowerShell). Du trenger ikke aktivere miljøet; kall Python-programmet
+i `.venv` direkte:
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -e ".[dev]"
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 ```
+
+Aktivering er valgfritt og bare en snarvei for kortere kommandoer. Bruk
+`.venv\Scripts\activate.bat` i cmd. `Activate.ps1` i PowerShell krever at
+kjøring av skript er tillatt, noe det ikke er som standard på Windows (se
+[Feilsøking](#feilsøking)).
 
 macOS/Linux:
 
@@ -163,11 +194,8 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-Kopier deretter miljøfilen:
-
-```bash
-cp .env.example .env
-```
+Innstillingene kan legges inn i appen, som lager `.env` selv. Vil du heller
+fylle ut filen på forhånd, kopier `.env.example` til `.env`.
 
 ---
 
@@ -581,6 +609,16 @@ Interaktiv dokumentasjon: <http://localhost:8000/api/docs>.
 ---
 
 ## Feilsøking
+
+**«Activate.ps1 cannot be loaded because running scripts is disabled on this
+system»** – Windows blokkerer PowerShell-skript som standard. Du trenger ikke
+aktivere miljøet: bruk `install.bat`, eller kall Python i `.venv` direkte, for
+eksempel `.\.venv\Scripts\python.exe -m pip install -e .`. Du trenger ikke
+endre execution policy på maskinen.
+
+**«Fant ikke Python» fra install.bat** – installer Python 3.11 eller nyere fra
+<https://www.python.org/downloads/> med «Add python.exe to PATH» avhuket, og
+kjør `install.bat` på nytt.
 
 **«Canvas avviste tokenet (401)»** – tokenet er utløpt eller feil. Lag et nytt i
 Canvas. Sjekk også at `CANVAS_URL` er basis-URL uten `/api/v1`.
