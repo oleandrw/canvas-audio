@@ -237,6 +237,28 @@ du velger begge deler eksplisitt før første generering.
 
 ## Starte lokalt
 
+### Med dobbeltklikk (Windows)
+
+Dobbeltklikk `start.bat` i prosjektmappa. Den starter appen og åpner nettleseren
+så snart appen svarer. Lukk konsollvinduet for å stoppe den.
+
+Vil du heller ha et ikon på skrivebordet, kjør dette én gang:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\create-desktop-shortcut.ps1
+```
+
+Det lager snarveien «Canvas til lyd» med appens ikon. `-ExecutionPolicy Bypass`
+gjelder bare for den ene kjøringen og endrer ingen innstillinger på maskinen.
+
+- Kjører appen allerede, åpner den bare nettleseren i stedet for å starte en til.
+- Er port 8000 opptatt av et annet program, sier den fra. Velg da en annen port:
+  `start.bat --port 8001`.
+- Den starter uten `--reload`, som er ment for vanlig bruk. `--reload` (under)
+  er for når du endrer koden.
+
+### Fra terminalen
+
 Den enkleste og mest robuste varianten – kjører venv-ens Python direkte, så du
 slipper både aktivering og execution policy:
 
