@@ -12,7 +12,7 @@ from typing import Any
 import httpx
 
 from app.logging_config import get_logger
-from app.services.errors import ConfigurationError, UpstreamError
+from app.services.errors import AuthenticationError, ConfigurationError, UpstreamError
 from app.services.http import build_client, raise_for_status, with_retries
 from app.services.text_service import ensure_plain_text
 
@@ -28,6 +28,55 @@ ERROR_MESSAGES = {
     422: "ElevenLabs avviste forespørselen (422). Sjekk valgt voice og modell.",
     429: "ElevenLabs begrenser antall forespørsler (429).",
 }
+
+
+INVALID_KEY_MESSAGE = (
+    "ElevenLabs sier at API-nøkkelen er ugyldig ({code}). Sjekk at hele nøkkelen er "
+    "kopiert uten mellomrom, og at den ikke er slettet eller deaktivert på "
+    "elevenlabs.io/app/settings/api-keys."
+)
+LIMITED_KEY_MESSAGE = (
+    "ElevenLabs avviste nøkkelen for denne handlingen ({code}): «{message}». Nøkkelen er "
+    "trolig begrenset. Rediger den på elevenlabs.io/app/settings/api-keys og gi den "
+    "tilgang til tekst til tale, stemmer og modeller, og gjerne brukerinformasjon så "
+    "appen kan vise forbruket."
+)
+REJECTED_KEY_MESSAGE = "ElevenLabs avviste API-nøkkelen ({code}): «{message}»."
+
+
+class InvalidKeyError(AuthenticationError):
+    """The key itself is wrong, as opposed to valid but not allowed to do this."""
+
+
+def _auth_problem(response: httpx.Response) -> tuple[str, str] | None:
+    """ElevenLabs' own ``(status, message)`` for a 401/403, if the body has one."""
+    if response.status_code not in (401, 403):
+        return None
+    try:
+        detail = response.json().get("detail")
+    except (ValueError, AttributeError):
+        return None
+    if isinstance(detail, dict):
+        return str(detail.get("status") or ""), str(detail.get("message") or "")
+    if isinstance(detail, str) and detail:
+        return "", detail
+    return None
+
+
+def _raise_for_auth(response: httpx.Response) -> None:
+    """Turn ElevenLabs' auth errors into messages that say what is actually wrong."""
+    problem = _auth_problem(response)
+    if problem is None:
+        return
+    status, message = problem
+    code = response.status_code
+    if status == "invalid_api_key":
+        text = INVALID_KEY_MESSAGE.format(code=code)
+        raise InvalidKeyError(text, provider=PROVIDER, status_code=code)
+    restricted = code == 403 or "permission" in status or "scope" in status
+    template = LIMITED_KEY_MESSAGE if restricted else REJECTED_KEY_MESSAGE
+    text = template.format(code=code, message=message or status or "ingen forklaring")
+    raise AuthenticationError(text, provider=PROVIDER, status_code=code)
 
 
 @dataclass(slots=True)
@@ -104,6 +153,7 @@ class ElevenLabsClient:
     ) -> httpx.Response:
         async def _call() -> httpx.Response:
             response = await self._client.request(method, url, params=params, json=json)
+            _raise_for_auth(response)
             raise_for_status(response, provider=PROVIDER, messages=ERROR_MESSAGES)
             return response
 
@@ -211,6 +261,7 @@ class ElevenLabsClient:
                 json=body,
                 headers={"Accept": "audio/mpeg"},
             )
+            _raise_for_auth(response)
             raise_for_status(response, provider=PROVIDER, messages=ERROR_MESSAGES)
             return response
 
@@ -230,8 +281,26 @@ class ElevenLabsClient:
 async def check_elevenlabs_connection(
     api_key: str, *, transport: httpx.AsyncBaseTransport | None = None
 ) -> dict[str, Any]:
+    """Used by the Settings page's "Test ElevenLabs" button.
+
+    A key that is valid but not allowed to read account details still passes,
+    as long as it can do the work the app needs; the reply says what is missing.
+    """
     async with ElevenLabsClient(api_key, transport=transport) as client:
-        sub = await client.get_subscription()
+        try:
+            sub = await client.get_subscription()
+        except InvalidKeyError:
+            raise
+        except AuthenticationError:
+            await client.list_models()  # raises if the key cannot do this either
+            return {
+                "ok": True,
+                "detail": (
+                    "Nøkkelen virker, men har ikke tilgang til brukerinformasjon, så forbruk "
+                    "og kvote kan ikke vises. Gi den den tilgangen på "
+                    "elevenlabs.io/app/settings/api-keys hvis du vil se det."
+                ),
+            }
     used = f"{sub.character_count:,}".replace(",", " ")
     limit = f"{sub.character_limit:,}".replace(",", " ")
     return {

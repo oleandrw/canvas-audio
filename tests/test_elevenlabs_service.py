@@ -5,7 +5,11 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from app.services.elevenlabs_service import ElevenLabsClient, check_elevenlabs_connection
+from app.services.elevenlabs_service import (
+    ElevenLabsClient,
+    InvalidKeyError,
+    check_elevenlabs_connection,
+)
 from app.services.errors import (
     AuthenticationError,
     ConfigurationError,
@@ -179,3 +183,87 @@ class TestErrors:
             with pytest.raises(QuotaExceededError, match="kvoten"):
                 await client.synthesize("Hei", voice_id="v1", model_id="m")
         assert calls["n"] == 1
+
+
+def auth_error(status: str, message: str, code: int = 401) -> httpx.Response:
+    """The shape ElevenLabs uses; the invalid-key variant was observed directly."""
+    detail = {"type": "authentication_error", "status": status, "message": message}
+    return httpx.Response(code, json={"detail": detail})
+
+
+MISSING_USER_READ = "The API key you used is missing the permission user_read."
+
+
+class TestKeyProblems:
+    async def test_a_wrong_key_says_so_and_is_not_retried(self) -> None:
+        calls = {"n": 0}
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return auth_error("invalid_api_key", "Invalid API key")
+
+        async with build(handler) as client:
+            with pytest.raises(InvalidKeyError, match="ugyldig"):
+                await client.get_subscription()
+        assert calls["n"] == 1
+
+    async def test_a_restricted_key_shows_elevenlabs_own_explanation(self) -> None:
+        handler = lambda _r: auth_error("missing_permissions", MISSING_USER_READ)  # noqa: E731
+        async with build(handler) as client:
+            with pytest.raises(AuthenticationError) as info:
+                await client.get_subscription()
+        assert not isinstance(info.value, InvalidKeyError)
+        assert "user_read" in info.value.message
+        assert "begrenset" in info.value.message
+
+    async def test_a_403_is_treated_as_a_restricted_key(self) -> None:
+        handler = lambda _r: auth_error("forbidden", "Not allowed", code=403)  # noqa: E731
+        async with build(handler) as client:
+            with pytest.raises(AuthenticationError, match="begrenset"):
+                await client.list_voices()
+
+    async def test_an_unknown_rejection_still_shows_the_reason(self) -> None:
+        handler = lambda _r: httpx.Response(401, json={"detail": "bad key"})  # noqa: E731
+        async with build(handler) as client:
+            with pytest.raises(AuthenticationError, match="bad key"):
+                await client.get_subscription()
+
+    async def test_synthesis_reports_the_same_way(self) -> None:
+        handler = lambda _r: auth_error("invalid_api_key", "Invalid API key")  # noqa: E731
+        async with build(handler) as client:
+            with pytest.raises(InvalidKeyError):
+                await client.synthesize("Hei", voice_id="v1", model_id="m")
+
+
+class TestConnectionCheck:
+    async def test_a_valid_key_without_account_access_still_passes(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/v1/user/subscription":
+                return auth_error("missing_permissions", MISSING_USER_READ)
+            model = {
+                "model_id": "eleven_multilingual_v2",
+                "name": "M",
+                "can_do_text_to_speech": True,
+            }
+            return httpx.Response(200, json=[model])
+
+        result = await check_elevenlabs_connection(KEY, transport=httpx.MockTransport(handler))
+        assert result["ok"] is True
+        assert "brukerinformasjon" in result["detail"]
+
+    async def test_fails_when_the_key_cannot_do_the_work_either(self) -> None:
+        missing = "missing the permission models_read"
+        handler = lambda _r: auth_error("missing_permissions", missing)  # noqa: E731
+        with pytest.raises(AuthenticationError, match="models_read"):
+            await check_elevenlabs_connection(KEY, transport=httpx.MockTransport(handler))
+
+    async def test_stops_at_a_wrong_key_without_trying_further(self) -> None:
+        paths: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            paths.append(request.url.path)
+            return auth_error("invalid_api_key", "Invalid API key")
+
+        with pytest.raises(InvalidKeyError):
+            await check_elevenlabs_connection(KEY, transport=httpx.MockTransport(handler))
+        assert paths == ["/v1/user/subscription"]
