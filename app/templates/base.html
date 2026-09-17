@@ -10,6 +10,7 @@
   <script src="{{ url_for('static', path='vendor/htmx.min.js') }}" defer></script>
   <script src="{{ url_for('static', path='js/app.js') }}" defer></script>
   <script src="{{ url_for('static', path='js/player.js') }}" defer></script>
+  <script src="{{ url_for('static', path='js/settings.js') }}" defer></script>
 </head>
 <body>
   {% if show_nav %}
@@ -37,6 +38,15 @@
   {% endif %}
 
   <main>
+    {% if restart_pending %}
+    <div class="alert alert-warn">
+      <span class="alert-icon">🔄</span>
+      <div>
+        Ny kode er hentet, men appen kjører fortsatt på den gamle.
+        <a href="/oppdatering">Se hva du gjør nå</a>.
+      </div>
+    </div>
+    {% endif %}
     {% block content %}{% endblock %}
   </main>
 

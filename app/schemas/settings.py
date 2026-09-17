@@ -61,6 +61,7 @@ class SettingsUpdate(BaseModel):
     cost_confirm_threshold_usd: float | None = Field(default=None, ge=0.0, le=100_000.0)
     filename_style: str | None = None
     soundcloud_sharing: str | None = None
+    soundcloud_auto_publish: bool | None = None
 
     @field_validator("ai_provider")
     @classmethod

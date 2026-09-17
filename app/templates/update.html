@@ -1,0 +1,205 @@
+{% extends "base.html" %}
+{% block title %}Oppdatering · Canvas → Lyd{% endblock %}
+
+{% macro commit_list(commits) -%}
+<ul class="commit-list">
+  {% for commit in commits %}
+  <li><code>{{ commit.sha }}</code> {{ commit.subject }} <span class="dim">{{ commit.date }}</span></li>
+  {% endfor %}
+</ul>
+{%- endmacro %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1>⬆️ Oppdatering</h1>
+    <p class="subtitle">Hvilken kode som kjører, og hvordan du henter ny.</p>
+  </div>
+</div>
+
+{% if status.running.restart_pending %}
+<div class="alert alert-warn">
+  <span class="alert-icon">🔄</span>
+  <div>
+    Ny kode er hentet, men appen kjører fortsatt på den gamle. Lukk vinduet og start appen på nytt.
+  </div>
+</div>
+{% endif %}
+
+<section class="section">
+  <div class="card">
+    <div class="card-header"><h2>Versjon</h2></div>
+    <div class="cost-lines">
+      <div class="cost-line"><span>Programversjon</span><span class="cost-value">{{ status.running.version }}</span></div>
+      <div class="cost-line">
+        <span>Commit som kjører</span>
+        <span class="cost-value mono">{{ status.running.boot_commit or "ukjent" }}</span>
+      </div>
+      <div class="cost-line">
+        <span>Commit i mappa</span>
+        <span class="cost-value mono">{{ status.running.head_commit or "ukjent" }}</span>
+      </div>
+      <div class="cost-line"><span>Gren</span><span class="cost-value mono">{{ status.git.branch or "—" }}</span></div>
+      <div class="cost-line">
+        <span>Databaseskjema</span>
+        <span class="cost-value">
+          versjon {{ status.db.expected_version }}
+          {% if not status.db.in_sync %}<span class="badge badge-warn">start appen på nytt</span>{% endif %}
+        </span>
+      </div>
+    </div>
+    <p class="field-hint">
+      {% if status.db.added_columns %}
+      Siste oppstart la til: <code>{{ status.db.added_columns|join("</code>, <code>")|safe }}</code>.
+      {% else %}
+      Siste oppstart fant ingenting å endre i databasen.
+      {% endif %}
+      {% if status.db.checked_at %}<span class="dim">Sjekket {{ status.db.checked_at }}.</span>{% endif %}
+      Programversjonen settes for hånd, så commit-en over sier mest om hvor ny koden er.
+    </p>
+  </div>
+</section>
+
+{% if status.git.available and status.git.is_repo %}
+<section class="section">
+  <div class="card">
+    <div class="card-header">
+      <h2>Git</h2>
+      <span class="spacer badge {{ 'badge-warn' if status.git.tracked_changes else ('badge-warn' if status.git.behind else 'badge-ok') }}">
+        {% if status.git.tracked_changes %}
+          Lokale endringer i {{ status.git.tracked_changes|length }} filer
+        {% elif status.git.behind %}
+          {{ status.git.behind }} nye commits
+        {% else %}
+          ✅ Du har siste versjon
+        {% endif %}
+      </span>
+    </div>
+
+    <p class="muted">
+      Gren <code>{{ status.git.branch }}</code>{% if status.git.last_fetch %} · sist hentet {{ status.git.last_fetch }}{% endif %}.
+    </p>
+
+    {% if status.git.behind %}
+    {{ commit_list(status.git.incoming) }}
+    {% endif %}
+
+    <div class="btn-row" style="margin-top: var(--space-5);">
+      <button class="btn btn-ghost" onclick="checkForUpdates(this)">🔄 Se etter oppdatering</button>
+      <button class="btn btn-primary" onclick="applyUpdate(this)" {{ "disabled" if not status.git.can_update }}>
+        ⬆️ Oppdater nå
+      </button>
+    </div>
+    {% if status.git.blocked_reason %}
+    <p class="field-hint">{{ status.git.blocked_reason }}</p>
+    {% elif not status.git.behind %}
+    <p class="field-hint">Ingenting å hente akkurat nå.</p>
+    {% endif %}
+
+    {% if status.git.tracked_changes %}
+    <details>
+      <summary>Endrede filer ({{ status.git.tracked_changes|length }})</summary>
+      <ul class="commit-list">
+        {% for line in status.git.tracked_changes %}<li><code>{{ line }}</code></li>{% endfor %}
+      </ul>
+    </details>
+    {% endif %}
+    {% if status.git.untracked %}
+    <p class="field-hint">
+      {{ status.git.untracked|length }} filer ligger i mappa uten å være i git (for eksempel
+      databasens WAL-filer). De påvirker ikke oppdateringen.
+    </p>
+    {% endif %}
+    <details>
+      <summary>Siste commits her</summary>
+      {{ commit_list(status.git.recent) }}
+    </details>
+  </div>
+</section>
+
+<section class="section">
+  <div class="card">
+    <div class="card-header"><h2>Etter en oppdatering</h2></div>
+    <ol class="numbered-hint">
+      <li>Lukk vinduet med loggen, eller trykk Ctrl+C i det.</li>
+      <li>Kjør <code>install.bat</code> <strong>bare</strong> hvis oppdateringen sa at avhengighetene er endret.</li>
+      <li>Dobbeltklikk på snarveien for å starte appen igjen.</li>
+      <li>Databasen oppgraderes automatisk ved oppstart. Versjonen over viser hvor langt den er kommet.</li>
+      <li>Lydfilene, <code>.env</code> og databasen røres aldri av en oppdatering.</li>
+    </ol>
+    <p class="field-hint">
+      Appen starter seg ikke selv på nytt. Den kjører i et vanlig konsollvindu uten vaktprosess, og
+      en automatisk omstart kunne endt med at appen ble borte uten at du så hvorfor.
+    </p>
+  </div>
+</section>
+
+{% if status.last_update %}
+<section class="section">
+  <div class="card">
+    <div class="card-header">
+      <h2>Siste oppdatering</h2>
+      <span class="spacer badge {{ 'badge-ok' if status.last_update.ok else 'badge-error' }}">
+        {{ "Fullført" if status.last_update.ok else "Stoppet" }}
+      </span>
+    </div>
+    <p class="muted">
+      {{ status.last_update.at }} · <code>{{ status.last_update.from_sha }}</code> →
+      <code>{{ status.last_update.to_sha }}</code><br>
+      {{ status.last_update.message }}
+    </p>
+  </div>
+</section>
+{% endif %}
+
+{% else %}
+<section class="section">
+  <div class="card">
+    <div class="card-header">
+      <h2>Kan ikke oppdatere seg selv</h2>
+      <span class="spacer badge badge-muted">{{ "git mangler" if not status.git.available else "ikke et git-arbeidstre" }}</span>
+    </div>
+    <p class="muted">{{ status.git.blocked_reason }}</p>
+    <p class="field-hint">
+      Kjører du i Docker, hentes ny versjon som et nytt image i stedet. Se README under
+      «GitHub og deployment».
+    </p>
+  </div>
+</section>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+  async function checkForUpdates(button) {
+    await withBusy(button, async function () {
+      const result = await api("/api/update/check", { method: "POST" });
+      const data = result.data || {};
+      if (!result.ok || !data.ok) {
+        return toast(data.message || errorMessage(result, "Fikk ikke sjekket."), "error");
+      }
+      toast(data.message, "ok");
+      if (data.behind) setTimeout(function () { location.reload(); }, 1200);
+    });
+  }
+
+  async function applyUpdate(button) {
+    const yes = await confirmDialog(
+      "Hente ny kode?",
+      "Koden i prosjektmappa oppdateres til siste versjon fra origin. Appen må startes på nytt " +
+      "etterpå. Lydfiler, database og nøkler røres ikke.",
+      "Oppdater"
+    );
+    if (!yes) return;
+    await withBusy(button, async function () {
+      const result = await api("/api/update/apply", { method: "POST" });
+      const data = result.data || {};
+      if (!result.ok || !data.ok) {
+        return toast(data.message || errorMessage(result, "Oppdateringen stoppet."), "error");
+      }
+      toast(data.message, "ok");
+      setTimeout(function () { location.reload(); }, 2000);
+    });
+  }
+</script>
+{% endblock %}

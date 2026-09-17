@@ -15,6 +15,7 @@ import re
 
 from bs4 import BeautifulSoup, Comment, NavigableString, Tag
 
+from app.services.canvas_player import MARKER_ATTR, MARKER_CLASS
 from app.services.errors import InvalidContentError
 
 #: Removed with their contents — never spoken, never useful.
@@ -271,6 +272,17 @@ class _Renderer:
                 self.blocks.append(end_sentence(", ".join(cells)))
 
 
+def _is_embedded_player(tag: Tag) -> bool:
+    """The app's own audio player block (see :mod:`app.services.canvas_player`)."""
+    if tag.name != "div":
+        return False
+    return (
+        MARKER_ATTR in tag.attrs
+        or MARKER_CLASS in (tag.get("class") or [])
+        or tag.get("id") == MARKER_CLASS
+    )
+
+
 def html_to_text(html: str) -> str:
     """Convert Canvas page HTML into clean, readable prose.
 
@@ -286,6 +298,9 @@ def html_to_text(html: str) -> str:
 
     for comment in soup.find_all(string=lambda text: isinstance(text, Comment)):
         comment.extract()
+    # The app's own audio player is not part of what the page says.
+    for element in soup.find_all(_is_embedded_player):
+        element.decompose()
     for tag_name in DROP_TAGS:
         for element in soup.find_all(tag_name):
             element.decompose()

@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% from "partials/macros.html" import secret_field, plain_field, test_button with context %}
+{% block title %}API · Canvas → Lyd{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1>🔑 API</h1>
+    <p class="subtitle">
+      Nøklene og adressene programmet trenger. Valg som stemme, modell og budsjett ligger under
+      <a href="/innstillinger">⚙️ Innstillinger</a>.
+    </p>
+  </div>
+</div>
+
+{% include "partials/env_alerts.html" %}
+
+<section class="section">
+  <div class="card">
+    <div class="card-header">
+      <h2>🎓 Canvas</h2>
+      <span class="spacer" id="test-canvas-result"></span>
+    </div>
+    {{ plain_field("canvas_url", "Adressen til Canvas", status.canvas_url,
+                   hint="Basis-URL uten <code>/api/v1</code>.", type="url",
+                   config_key="CANVAS_URL", provider="canvas",
+                   placeholder="https://skolen.instructure.com") }}
+    {{ secret_field("canvas_token", "CANVAS_TOKEN", provider="canvas", removable=True,
+                    hint="Lages i Canvas under Konto → Innstillinger → «+ Ny tilgangsnøkkel».") }}
+    <div class="btn-row">
+      {{ test_button("canvas", "Canvas") }}
+      <a class="btn btn-ghost" href="/canvas">Hent emner →</a>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="card">
+    <div class="card-header">
+      <h2>🎙️ ElevenLabs</h2>
+      <span class="spacer" id="test-elevenlabs-result"></span>
+    </div>
+    {{ secret_field("elevenlabs_api_key", "ELEVENLABS_API_KEY", provider="elevenlabs", removable=True,
+                    hint="Hentes på elevenlabs.io under Profile → API key.") }}
+    <div class="btn-row">
+      {{ test_button("elevenlabs", "ElevenLabs") }}
+      <a class="btn btn-ghost" href="/innstillinger">Velg stemme og modell →</a>
+    </div>
+    <p class="field-hint">
+      Stemmelista hentes med den lagrede nøkkelen, så lagre her først, og velg deretter stemme og
+      modell under Innstillinger.
+    </p>
+  </div>
+</section>
+
+<section class="section">
+  <div class="card">
+    <div class="card-header">
+      <h2>✨ AI-nøkler</h2>
+      <span class="spacer" id="test-openai-result"></span>
+      <span id="test-anthropic-result"></span>
+    </div>
+    <p class="muted">
+      Valgfritt. Standard er <strong>Ingen AI</strong> — da leses den rensede Canvas-teksten opp
+      direkte. Leverandør og modell velges under <a href="/innstillinger">Innstillinger</a>.
+    </p>
+    {{ secret_field("openai_api_key", "OPENAI_API_KEY", provider="openai", removable=True) }}
+    {{ secret_field("anthropic_api_key", "ANTHROPIC_API_KEY", provider="anthropic", removable=True) }}
+    <div class="btn-row">
+      {{ test_button("openai", "OpenAI") }}
+      {{ test_button("anthropic", "Anthropic") }}
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="card">
+    <div class="card-header">
+      <h2>☁️ SoundCloud</h2>
+      <span class="spacer" id="test-soundcloud-result"></span>
+    </div>
+    <p class="muted">
+      Valgfritt. Krever Artist Pro-abonnement og manuelt godkjent API-applikasjon.
+    </p>
+    {{ plain_field("soundcloud_client_id", "Client ID", status.soundcloud_client_id,
+                   config_key="SOUNDCLOUD_CLIENT_ID", provider="soundcloud") }}
+    {{ secret_field("soundcloud_client_secret", "SOUNDCLOUD_CLIENT_SECRET",
+                    provider="soundcloud", removable=True) }}
+    {{ plain_field("soundcloud_redirect_uri", "Redirect URI", status.soundcloud_redirect_uri,
+                   hint="Må være nøyaktig den samme som er registrert hos SoundCloud.",
+                   config_key="SOUNDCLOUD_REDIRECT_URI") }}
+    <div class="btn-row">
+      {{ test_button("soundcloud", "SoundCloud") }}
+      <a class="btn btn-ghost" href="/soundcloud">Koble til kontoen →</a>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="card">
+    <div class="card-header"><h2>🔒 Tilgang</h2></div>
+    {{ secret_field("app_password", "APP_PASSWORD", removable=True,
+                    hint="Settes det, kreves innlogging for hele applikasjonen. Anbefalt hvis andre
+                          kan nå maskinen din.") }}
+  </div>
+</section>
+
+<div class="btn-row" style="position: sticky; bottom: var(--space-4);">
+  <button class="btn btn-primary" onclick="saveSettings(this)">💾 Lagre nøkler</button>
+</div>
+{% endblock %}

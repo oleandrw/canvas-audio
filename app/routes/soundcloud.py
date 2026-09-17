@@ -1,11 +1,15 @@
-"""SoundCloud: OAuth connect, upload tracks, sync one playlist per Canvas module.
+"""SoundCloud: OAuth connect, upload tracks, publish one playlist per Canvas module.
 
 Everything here degrades gracefully. If the integration is not configured or the
 account cannot use the API, the endpoints report that clearly and the rest of
-the application is unaffected.
+the application is unaffected. The publishing logic itself lives in
+:mod:`app.services.soundcloud_publish`, shared with automatic publishing after a
+generation job.
 """
 
 from __future__ import annotations
+
+from dataclasses import asdict
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
@@ -15,22 +19,25 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import get_session, run_db
 from app.logging_config import get_logger
-from app.models.core import Module, Page, SoundCloudPlaylist, SoundCloudTrack
+from app.models.core import SoundCloudPlaylist, SoundCloudTrack
 from app.schemas.common import OkResponse
 from app.schemas.soundcloud import (
+    AccountPlaylist,
+    ModulePlaylistLink,
     PlaylistResult,
     PlaylistSyncResponse,
+    PublishRequest,
+    PublishResponse,
     SoundCloudStatus,
     UploadedItem,
     UploadRequest,
     UploadResponse,
 )
 from app.security import new_state_token, pkce_pair, require_auth
-from app.services import soundcloud_service
+from app.services import soundcloud_publish, soundcloud_service
 from app.services.app_settings import load_preferences
-from app.services.audio_service import resolve_path
 from app.services.errors import ServiceError, SoundCloudNotConnected
-from app.services.presenters import selected_course
+from app.services.soundcloud_publish import PlaylistOutcome, UploadOutcome
 
 logger = get_logger("app.routes.soundcloud")
 
@@ -140,115 +147,15 @@ def disconnect(session: Session = Depends(get_session)) -> OkResponse:
 
 
 # --------------------------------------------------------------------------- #
-# Upload
+# Response shaping
 # --------------------------------------------------------------------------- #
 
 
-def _pages_for_upload(session: Session, page_ids: list[int]) -> list[Page]:
-    if page_ids:
-        pages = list(session.execute(select(Page).where(Page.id.in_(page_ids))).scalars().all())
-    else:
-        course = selected_course(session)
-        if course is None:
-            return []
-        pages = list(
-            session.execute(
-                select(Page)
-                .where(Page.course_id == course.id, Page.archived.is_(False))
-                .order_by(Page.module_id, Page.position)
-            )
-            .scalars()
-            .all()
-        )
-    return [p for p in pages if p.audio is not None]
-
-
-@router.post("/upload", response_model=UploadResponse)
-async def upload(payload: UploadRequest) -> UploadResponse:
-    """Upload generated audio. A file that is already on SoundCloud is reused."""
-    settings = get_settings()
-
-    def _collect(session: Session) -> tuple[list[dict[str, object]], str]:
-        prefs = load_preferences(session)
-        rows: list[dict[str, object]] = []
-        for page in _pages_for_upload(session, payload.page_ids):
-            track = page.soundcloud_track
-            rows.append(
-                {
-                    "page_id": page.id,
-                    "title": page.title,
-                    "module_name": page.module.name if page.module else "Uten modul",
-                    "course_name": page.course.name,
-                    "relative_path": page.audio.relative_path,
-                    "file_hash": page.audio.file_hash,
-                    "existing_track_id": track.track_id if track else "",
-                    "existing_file_hash": track.file_hash if track else "",
-                    "existing_url": track.permalink_url if track else "",
-                }
-            )
-        return rows, prefs.soundcloud_sharing
-
-    rows, sharing = await run_db(_collect)
-    if not rows:
-        return UploadResponse(ok=False, message="Ingen genererte lydfiler å laste opp.")
-
-    token = await soundcloud_service.get_access_token(
-        client_id=settings.soundcloud_client_id,
-        client_secret=settings.soundcloud_client_secret,
-    )
-
-    response = UploadResponse()
-    async with soundcloud_service.SoundCloudClient(token) as client:
-        for row in rows:
-            page_id = int(row["page_id"])
-            title = str(row["title"])
-
-            unchanged = row["existing_track_id"] and row["existing_file_hash"] == row["file_hash"]
-            if unchanged and not payload.force:
-                response.reused += 1
-                response.items.append(
-                    UploadedItem(
-                        page_id=page_id,
-                        title=title,
-                        track_id=str(row["existing_track_id"]),
-                        permalink_url=str(row["existing_url"]),
-                        status="reused",
-                        message="Allerede lastet opp med samme lydfil.",
-                    )
-                )
-                continue
-
-            try:
-                path = resolve_path(str(row["relative_path"]))
-                uploaded = await client.upload_track(
-                    file_path=path,
-                    title=title,
-                    description=f"{row['course_name']} — {row['module_name']}",
-                    sharing=sharing,
-                )
-            except (ServiceError, ValueError) as exc:
-                response.failed += 1
-                response.items.append(
-                    UploadedItem(page_id=page_id, title=title, status="failed", message=str(exc))
-                )
-                continue
-
-            await run_db(
-                lambda db, pid=page_id, up=uploaded, fh=str(row["file_hash"]): _store_track(
-                    db, pid, up, fh
-                )
-            )
-            response.uploaded += 1
-            response.items.append(
-                UploadedItem(
-                    page_id=page_id,
-                    title=title,
-                    track_id=uploaded.track_id,
-                    permalink_url=uploaded.permalink_url,
-                    status="uploaded",
-                )
-            )
-
+def _upload_response(outcomes: list[UploadOutcome]) -> UploadResponse:
+    response = UploadResponse(items=[UploadedItem(**asdict(outcome)) for outcome in outcomes])
+    response.uploaded = sum(1 for o in outcomes if o.status == "uploaded")
+    response.reused = sum(1 for o in outcomes if o.status == "reused")
+    response.failed = sum(1 for o in outcomes if o.status == "failed")
     response.ok = response.failed == 0
     response.message = (
         f"{response.uploaded} lastet opp, {response.reused} gjenbrukt, {response.failed} feilet."
@@ -256,144 +163,103 @@ async def upload(payload: UploadRequest) -> UploadResponse:
     return response
 
 
-def _store_track(session: Session, page_id: int, uploaded: object, file_hash: str) -> None:
-    page = session.get(Page, page_id)
-    if page is None:
-        return
-    track = page.soundcloud_track or SoundCloudTrack(page_id=page_id)
-    track.track_id = uploaded.track_id  # type: ignore[attr-defined]
-    track.title = uploaded.title  # type: ignore[attr-defined]
-    track.permalink_url = uploaded.permalink_url  # type: ignore[attr-defined]
-    track.file_hash = file_hash
-    if page.soundcloud_track is None:
-        session.add(track)
-    session.flush()
-
-
-# --------------------------------------------------------------------------- #
-# Playlists
-# --------------------------------------------------------------------------- #
-
-
-@router.post("/sync-playlists", response_model=PlaylistSyncResponse)
-async def sync_playlists() -> PlaylistSyncResponse:
-    """One SoundCloud playlist per Canvas module, in Canvas page order."""
-    settings = get_settings()
-
-    def _collect(session: Session) -> list[dict[str, object]]:
-        course = selected_course(session)
-        if course is None:
-            return []
-        modules = (
-            session.execute(
-                select(Module).where(Module.course_id == course.id).order_by(Module.position)
-            )
-            .scalars()
-            .all()
-        )
-        rows: list[dict[str, object]] = []
-        for module in modules:
-            pages = sorted(
-                (p for p in module.pages if not p.archived), key=lambda p: (p.position, p.title)
-            )
-            track_ids = [
-                p.soundcloud_track.track_id for p in pages if p.soundcloud_track is not None
-            ]
-            rows.append(
-                {
-                    "module_id": module.id,
-                    "module_name": module.name,
-                    "course_name": course.name,
-                    "track_ids": track_ids,
-                    "playlist_id": module.playlist.playlist_id if module.playlist else "",
-                }
-            )
-        return rows
-
-    modules = await run_db(_collect)
-    if not modules:
-        return PlaylistSyncResponse(ok=False, message="Ingen moduler å synkronisere.")
-
-    token = await soundcloud_service.get_access_token(
-        client_id=settings.soundcloud_client_id,
-        client_secret=settings.soundcloud_client_secret,
+def _playlist_response(outcomes: list[PlaylistOutcome]) -> PlaylistSyncResponse:
+    response = PlaylistSyncResponse(
+        results=[PlaylistResult(**asdict(outcome)) for outcome in outcomes]
     )
-
-    response = PlaylistSyncResponse()
-    async with soundcloud_service.SoundCloudClient(token) as client:
-        for row in modules:
-            module_id = int(row["module_id"])
-            name = str(row["module_name"])
-            track_ids = list(row["track_ids"])  # type: ignore[arg-type]
-
-            if not track_ids:
-                response.results.append(
-                    PlaylistResult(
-                        module_id=module_id,
-                        module_name=name,
-                        status="skipped",
-                        message="Ingen opplastede spor i denne modulen.",
-                    )
-                )
-                continue
-
-            try:
-                if row["playlist_id"]:
-                    info = await client.update_playlist(
-                        str(row["playlist_id"]), track_ids=track_ids
-                    )
-                    status_name = "updated"
-                    response.updated += 1
-                else:
-                    info = await client.create_playlist(
-                        title=name,
-                        description=str(row["course_name"]),
-                        track_ids=track_ids,
-                    )
-                    status_name = "created"
-                    response.created += 1
-            except ServiceError as exc:
-                response.failed += 1
-                response.results.append(
-                    PlaylistResult(
-                        module_id=module_id, module_name=name, status="failed", message=str(exc)
-                    )
-                )
-                continue
-
-            await run_db(
-                lambda db, mid=module_id, pl=info, title=name: _store_playlist(db, mid, pl, title)
-            )
-            response.results.append(
-                PlaylistResult(
-                    module_id=module_id,
-                    module_name=name,
-                    playlist_id=info.playlist_id,
-                    permalink_url=info.permalink_url,
-                    track_count=len(track_ids),
-                    status=status_name,
-                )
-            )
-
+    response.created = sum(1 for o in outcomes if o.status == "created")
+    response.updated = sum(1 for o in outcomes if o.status == "updated")
+    response.unchanged = sum(1 for o in outcomes if o.status == "unchanged")
+    response.failed = sum(1 for o in outcomes if o.status == "failed")
     response.ok = response.failed == 0
     response.message = (
-        f"{response.created} opprettet, {response.updated} oppdatert, {response.failed} feilet."
+        f"{response.created} opprettet, {response.updated} oppdatert, "
+        f"{response.unchanged} uendret, {response.failed} feilet."
     )
     return response
 
 
-def _store_playlist(session: Session, module_id: int, info: object, title: str) -> None:
-    module = session.get(Module, module_id)
-    if module is None:
-        return
-    playlist = module.playlist or SoundCloudPlaylist(module_id=module_id)
-    playlist.playlist_id = info.playlist_id or playlist.playlist_id  # type: ignore[attr-defined]
-    playlist.title = info.title or title  # type: ignore[attr-defined]
-    playlist.permalink_url = info.permalink_url or playlist.permalink_url  # type: ignore[attr-defined]
-    playlist.track_count = info.track_count  # type: ignore[attr-defined]
-    if module.playlist is None:
-        session.add(playlist)
-    session.flush()
+# --------------------------------------------------------------------------- #
+# Upload and playlists
+# --------------------------------------------------------------------------- #
+
+
+@router.post("/upload", response_model=UploadResponse)
+async def upload(payload: UploadRequest) -> UploadResponse:
+    """Upload generated audio. A file that is already on SoundCloud is reused."""
+    page_ids = payload.page_ids or None
+    count = await run_db(
+        lambda session: soundcloud_publish.count_uploadable(session, page_ids=page_ids)
+    )
+    if not count:
+        return UploadResponse(ok=False, message="Ingen genererte lydfiler å laste opp.")
+
+    async with soundcloud_publish.connected_client() as client:
+        outcomes = await soundcloud_publish.upload_pages(
+            client, page_ids=page_ids, force=payload.force
+        )
+    return _upload_response(outcomes)
+
+
+@router.post("/sync-playlists", response_model=PlaylistSyncResponse)
+async def sync_playlists() -> PlaylistSyncResponse:
+    """One playlist per module. Tracks already in a playlist are never removed."""
+    async with soundcloud_publish.connected_client() as client:
+        outcomes = await soundcloud_publish.sync_playlists(client)
+    if not outcomes:
+        return PlaylistSyncResponse(ok=False, message="Ingen moduler å synkronisere.")
+    return _playlist_response(outcomes)
+
+
+@router.post("/publish", response_model=PublishResponse)
+async def publish(payload: PublishRequest) -> PublishResponse:
+    """Upload the modules' audio and create or update their playlists, right now.
+
+    Unlike automatic publishing this does not wait for a module to be complete:
+    the user asked for it explicitly.
+    """
+    module_ids = payload.module_ids or None
+    async with soundcloud_publish.connected_client() as client:
+        uploads, playlists = await soundcloud_publish.publish_modules(client, module_ids)
+    ok, message = soundcloud_publish.summarize(uploads, playlists)
+    return PublishResponse(
+        ok=ok,
+        message=message,
+        uploads=_upload_response(uploads),
+        playlists=_playlist_response(playlists),
+    )
+
+
+@router.get("/playlists", response_model=list[AccountPlaylist])
+async def account_playlists() -> list[AccountPlaylist]:
+    """Playlists on the connected SoundCloud account, for linking to a module."""
+    async with soundcloud_publish.connected_client() as client:
+        playlists = await client.list_my_playlists()
+    return [
+        AccountPlaylist(
+            playlist_id=p.playlist_id,
+            title=p.title,
+            permalink_url=p.permalink_url,
+            sharing=p.sharing,
+        )
+        for p in playlists
+    ]
+
+
+@router.put("/modules/{module_id}/playlist", response_model=OkResponse)
+async def link_module_playlist(module_id: int, payload: ModulePlaylistLink) -> OkResponse:
+    """Choose the playlist a module publishes to. Nothing on SoundCloud changes here."""
+    if not payload.playlist_id:
+        await run_db(lambda session: soundcloud_publish.link_playlist(session, module_id, None))
+        return OkResponse(message="Modulen får en ny spilleliste neste gang den publiseres.")
+
+    async with soundcloud_publish.connected_client() as client:
+        info = await client.get_playlist(payload.playlist_id)
+    await run_db(lambda session: soundcloud_publish.link_playlist(session, module_id, info))
+    title = info.title or payload.playlist_id
+    return OkResponse(
+        message=f"Modulen publiserer nå til «{title}». Sporene som ligger der fra før, beholdes."
+    )
 
 
 @router.get("/require-connection", response_model=OkResponse)

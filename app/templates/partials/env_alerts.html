@@ -1,0 +1,24 @@
+{# Everything this page says about .env: which values the environment owns, and
+   whether the file can be written at all. Included by the 🔑 API page. #}
+
+{% if env_locked_keys %}
+<div class="alert alert-info">
+  <span class="alert-icon">🔒</span>
+  <div>
+    Disse verdiene kommer fra miljøvariabler og kan ikke endres herfra
+    (som det skal være på en server): <strong>{{ env_locked_keys|join(", ") }}</strong>.
+  </div>
+</div>
+{% endif %}
+
+<div class="alert {{ 'alert-ok' if status.env_file_writable else 'alert-warn' }}">
+  <span class="alert-icon">{{ "💾" if status.env_file_writable else "🔒" }}</span>
+  <div>
+    {% if status.env_file_writable %}
+    Nøklene skrives til <code>.env</code> i prosjektmappa, aldri til databasen og aldri til Git.
+    Feltene viser bare en maskert variant — den fulle nøkkelen sendes aldri tilbake til nettleseren.
+    {% else %}
+    <code>.env</code> kan ikke skrives her. Bruk miljøvariabler i stedet.
+    {% endif %}
+  </div>
+</div>

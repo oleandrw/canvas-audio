@@ -553,3 +553,278 @@ class TestErrorHandling:
         response = client.post("/api/generation", json={"mode": "tull"})
         assert response.status_code == 422
         assert "utvalgsmodus" in response.json()["detail"].lower()
+
+
+class TestSoundCloudPublishingApi:
+    def test_listing_playlists_requires_a_connection(self, client: TestClient) -> None:
+        response = client.get("/api/soundcloud/playlists")
+        assert response.status_code == 400
+        assert "SoundCloud" in response.json()["detail"]
+
+    def test_linking_an_existing_playlist(
+        self, client: TestClient, seeded: dict[str, Any], db: Session, monkeypatch
+    ) -> None:
+        from contextlib import asynccontextmanager
+
+        from app.models.core import SoundCloudPlaylist
+        from app.services import soundcloud_publish
+        from app.services.soundcloud_service import SoundCloudClient
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            playlist = {"id": 555, "title": "Mine favoritter", "tracks": [{"id": 7}]}
+            return httpx.Response(200, json={**playlist, "permalink_url": "https://snd.sc/p555"})
+
+        @asynccontextmanager
+        async def fake_client(transport=None):
+            async with SoundCloudClient("token", transport=httpx.MockTransport(handler)) as c:
+                yield c
+
+        monkeypatch.setattr(soundcloud_publish, "connected_client", fake_client)
+        module = seeded["modules"][0]
+
+        response = client.put(
+            f"/api/soundcloud/modules/{module.id}/playlist", json={"playlist_id": "555"}
+        )
+        assert response.status_code == 200
+        assert "beholdes" in response.json()["message"]
+
+        db.expire_all()
+        stored = db.query(SoundCloudPlaylist).filter_by(module_id=module.id).one()
+        assert stored.playlist_id == "555"
+        assert stored.title == "Mine favoritter"
+
+    def test_choosing_a_new_playlist_removes_the_link(
+        self, client: TestClient, seeded: dict[str, Any], db: Session
+    ) -> None:
+        from app.models.core import SoundCloudPlaylist
+
+        module = seeded["modules"][0]
+        db.add(SoundCloudPlaylist(module_id=module.id, playlist_id="555", title="Gammel"))
+        db.commit()
+
+        response = client.put(
+            f"/api/soundcloud/modules/{module.id}/playlist", json={"playlist_id": ""}
+        )
+        assert response.status_code == 200
+        db.expire_all()
+        assert db.query(SoundCloudPlaylist).count() == 0
+
+    def test_an_invalid_playlist_id_is_rejected(
+        self, client: TestClient, seeded: dict[str, Any]
+    ) -> None:
+        module = seeded["modules"][0]
+        response = client.put(
+            f"/api/soundcloud/modules/{module.id}/playlist", json={"playlist_id": "abc"}
+        )
+        assert response.status_code == 422
+
+    def test_an_unknown_module_is_a_404(self, client: TestClient) -> None:
+        response = client.put("/api/soundcloud/modules/99999/playlist", json={"playlist_id": ""})
+        assert response.status_code == 404
+
+    def test_the_auto_publish_setting_is_saved(self, client: TestClient) -> None:
+        assert (
+            client.post("/api/settings", json={"soundcloud_auto_publish": True}).status_code == 200
+        )
+        preferences = client.get("/api/settings/status").json()["preferences"]
+        assert preferences["soundcloud_auto_publish"] == "True"
+
+    def test_publishing_now_requires_a_connection(
+        self, client: TestClient, seeded: dict[str, Any]
+    ) -> None:
+        module = seeded["modules"][0]
+        response = client.post("/api/soundcloud/publish", json={"module_ids": [module.id]})
+        assert response.status_code == 400
+
+    def test_the_soundcloud_page_lists_modules(
+        self, client: TestClient, seeded: dict[str, Any]
+    ) -> None:
+        response = client.get("/soundcloud")
+        assert response.status_code == 200
+        assert "Moduler og spillelister" in response.text
+        assert "Modul 1 – Introduksjon" in response.text
+
+
+def _client_without(env, monkeypatch, *keys: str) -> TestClient:
+    """A fresh app where the given credentials are unset and `.env` is writable."""
+    from app.config import reset_store
+    from app.main import create_app
+
+    for key in keys:
+        monkeypatch.delenv(key, raising=False)
+    reset_store(env_path=env / ".env")
+    return TestClient(create_app())
+
+
+class TestApiKeysPage:
+    """Keys live on their own page; Innstillinger keeps only the choices."""
+
+    def test_the_page_shows_every_credential(self, client: TestClient) -> None:
+        body = client.get("/api-nokler").text
+        for field in (
+            "canvas_url",
+            "canvas_token",
+            "elevenlabs_api_key",
+            "openai_api_key",
+            "anthropic_api_key",
+            "soundcloud_client_id",
+            "soundcloud_client_secret",
+            "soundcloud_redirect_uri",
+            "app_password",
+        ):
+            assert f'id="{field}"' in body
+        for provider in ("canvas", "elevenlabs", "openai", "anthropic", "soundcloud"):
+            assert f'id="test-{provider}-result"' in body
+
+    def test_the_page_never_leaks_a_key(self, client: TestClient) -> None:
+        from tests.conftest import DUMMY_ENV
+
+        response = client.get("/api-nokler")
+        assert response.status_code == 200
+        for key in ("CANVAS_TOKEN", "ELEVENLABS_API_KEY", "SOUNDCLOUD_CLIENT_SECRET"):
+            assert DUMMY_ENV[key] not in response.text
+
+    def test_environment_managed_keys_are_locked(self, client: TestClient) -> None:
+        body = client.get("/api-nokler").text
+        assert "Fra miljøvariabel" in body
+        assert "disabled" in body
+
+    def test_settings_keeps_the_choices_and_drops_the_keys(self, client: TestClient) -> None:
+        body = client.get("/innstillinger").text
+        for gone in (
+            "canvas_token",
+            "elevenlabs_api_key",
+            "soundcloud_client_secret",
+            "app_password",
+        ):
+            assert f'id="{gone}"' not in body
+        for kept in ("ai_provider", "voice_stability", "monthly_budget_usd", "soundcloud_sharing"):
+            assert f'id="{kept}"' in body
+        assert "/api-nokler" in body, "the page must say where the keys went"
+
+    def test_the_api_page_comes_before_innstillinger_in_the_menu(self, client: TestClient) -> None:
+        body = client.get("/").text
+        assert body.index('href="/api-nokler"') < body.index('href="/innstillinger"')
+        assert "🔑" in body
+
+    def test_saving_only_keys_leaves_the_preferences_alone(self, client: TestClient) -> None:
+        client.post("/api/settings", json={"monthly_budget_usd": 42, "filename_style": "title"})
+        before = client.get("/api/settings/status").json()["preferences"]
+
+        response = client.post("/api/settings", json={"canvas_url": "https://ny.test"})
+
+        assert response.status_code == 200
+        assert client.get("/api/settings/status").json()["preferences"] == before
+
+    def test_a_key_can_be_removed_from_env(self, env, monkeypatch) -> None:
+        with _client_without(env, monkeypatch, "OPENAI_API_KEY") as client:
+            client.post("/api/settings", json={"openai_api_key": "sk-skal-slettes"})
+            assert "OPENAI_API_KEY" in (env / ".env").read_text(encoding="utf-8")
+
+            response = client.post("/api/settings", json={"openai_api_key": ""})
+
+            assert response.status_code == 200
+            assert "OPENAI_API_KEY" not in (env / ".env").read_text(encoding="utf-8")
+
+    def test_the_voice_button_waits_for_a_saved_key(self, env, monkeypatch) -> None:
+        with _client_without(env, monkeypatch, "ELEVENLABS_API_KEY") as client:
+            body = client.get("/innstillinger").text
+        assert "Legg inn ElevenLabs-nøkkelen" in body
+        assert "/api-nokler" in body
+
+    def test_the_dashboard_sends_you_to_the_api_page(self, env, monkeypatch) -> None:
+        with _client_without(env, monkeypatch, "ELEVENLABS_API_KEY") as client:
+            body = client.get("/").text
+        assert "Mangler oppsett" in body
+        assert 'href="/api-nokler"' in body
+
+    def test_the_page_is_locked_behind_the_password(self, env, monkeypatch) -> None:
+        monkeypatch.setenv("APP_PASSWORD", "hemmelig")
+        from app.config import reset_store
+        from app.main import create_app
+
+        reset_store(env_path=env / ".env")
+        with TestClient(create_app()) as locked:
+            assert locked.get("/api-nokler", follow_redirects=False).status_code == 303
+
+
+class TestUpdateApi:
+    """The update page and its endpoints. Git is faked; see tests/test_update_service.py."""
+
+    def test_status_reports_version_git_and_schema(self, client: TestClient, monkeypatch) -> None:
+        from tests.test_update_service import fake_git, repo
+
+        fake_git(monkeypatch, repo())
+
+        body = client.get("/api/update/status").json()
+
+        assert body["running"]["version"]
+        assert body["running"]["restart_pending"] is False
+        assert body["git"]["branch"] == "main"
+        assert body["git"]["can_update"] is False
+        assert body["db"]["expected_version"] == body["db"]["file_version"]
+
+    def test_check_fetches_and_reports_what_is_new(self, client: TestClient, monkeypatch) -> None:
+        from tests.test_update_service import behind_by, fake_git
+
+        calls: list[list[str]] = []
+        fake_git(monkeypatch, behind_by(2), calls)
+
+        body = client.post("/api/update/check").json()
+
+        assert body["ok"] is True
+        assert body["behind"] == 2
+        assert len(body["incoming"]) == 2
+        assert any(call[0] == "fetch" for call in calls)
+
+    def test_apply_refuses_a_dirty_tree(self, client: TestClient, monkeypatch) -> None:
+        from tests.test_update_service import behind_by, fake_git, ok
+
+        calls: list[list[str]] = []
+        fake_git(
+            monkeypatch, behind_by(1, {("status", "--porcelain"): ok(" M app/main.py")}), calls
+        )
+
+        body = client.post("/api/update/apply").json()
+
+        assert body["ok"] is False
+        assert "lokale endringer" in body["message"]
+        assert not any("merge" in call for call in calls)
+
+    def test_the_page_shows_the_cards(self, client: TestClient, monkeypatch) -> None:
+        from tests.test_update_service import fake_git, repo
+
+        fake_git(monkeypatch, repo())
+
+        text = client.get("/oppdatering").text
+
+        assert "Versjon" in text
+        assert "Du har siste versjon" in text
+        assert "Etter en oppdatering" in text
+        assert "install.bat" in text
+
+    def test_the_page_degrades_without_git(self, client: TestClient, monkeypatch) -> None:
+        from app.services import update_service
+        from tests.test_update_service import fake_git
+
+        fake_git(monkeypatch, {("rev-parse",): update_service.GitRun(False, "", "", -1)})
+
+        response = client.get("/oppdatering")
+
+        assert response.status_code == 200
+        assert "Fant ikke git" in response.text
+        assert "Oppdater nå" not in response.text
+
+    def test_the_menu_ends_with_the_update_page(self, client: TestClient) -> None:
+        body = client.get("/").text
+        assert body.index('href="/oppdatering"') > body.index('href="/innstillinger"')
+
+    def test_the_endpoints_need_the_password(self, env, monkeypatch) -> None:
+        monkeypatch.setenv("APP_PASSWORD", "hemmelig")
+        from app.config import reset_store
+        from app.main import create_app
+
+        reset_store(env_path=env / ".env")
+        with TestClient(create_app()) as locked:
+            assert locked.get("/api/update/status").status_code == 401
+            assert locked.get("/oppdatering", follow_redirects=False).status_code == 303

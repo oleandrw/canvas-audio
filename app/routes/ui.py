@@ -30,11 +30,11 @@ from app.pricing import load_pricing
 from app.routes.settings import SECRET_LABELS, build_status
 from app.schemas.costs import EstimateRequest
 from app.security import SESSION_AUTH_KEY, is_authenticated, verify_password
-from app.services import soundcloud_service
+from app.services import soundcloud_publish, soundcloud_service, update_service
 from app.services.app_settings import load_preferences
 from app.services.audio_service import format_bytes, format_duration
 from app.services.cost_service import build_estimate
-from app.services.hashing import page_audio_status, status_label
+from app.services.hashing import audio_is_current, page_audio_status, status_label
 from app.services.presenters import (
     item_status_label,
     job_out,
@@ -55,8 +55,16 @@ NAV_ITEMS = [
     {"key": "dashboard", "href": "/", "emoji": "📊", "label": "Oversikt"},
     {"key": "canvas", "href": "/canvas", "emoji": "🎓", "label": "Canvas"},
     {"key": "generation", "href": "/generering", "emoji": "🎧", "label": "Generering"},
+    {
+        "key": "canvas_player",
+        "href": "/publiser-canvas",
+        "emoji": "📤",
+        "label": "Publiser i Canvas",
+    },
     {"key": "soundcloud", "href": "/soundcloud", "emoji": "☁️", "label": "SoundCloud"},
+    {"key": "api", "href": "/api-nokler", "emoji": "🔑", "label": "API"},
     {"key": "settings", "href": "/innstillinger", "emoji": "⚙️", "label": "Innstillinger"},
+    {"key": "update", "href": "/oppdatering", "emoji": "⬆️", "label": "Oppdatering"},
 ]
 
 STATUS_BADGE_CLASS = {
@@ -140,6 +148,7 @@ def render(request: Request, template: str, active: str, context: dict[str, Any]
         "provider_label": provider_label,
         "item_status_label": item_status_label,
         "ai_models_json": _ai_models_json(),
+        "restart_pending": update_service.restart_pending(),
     }
     base.update(context)
     return templates.TemplateResponse(request, template, base)
@@ -473,13 +482,20 @@ def soundcloud_view(request: Request, session: Session = Depends(get_session)) -
             .all()
         ):
             pages = [p for p in module.pages if not p.archived]
+            spoken = [p for p in pages if p.tts_text.strip()]
+            current = sum(1 for p in spoken if audio_is_current(p))
+            playlist = module.playlist
             modules.append(
                 {
+                    "id": module.id,
                     "name": module.name,
-                    "with_audio": sum(1 for p in pages if p.audio is not None),
+                    "pages": len(spoken),
+                    "with_audio": current,
+                    "complete": bool(spoken) and current == len(spoken),
                     "uploaded": sum(1 for p in pages if p.soundcloud_track is not None),
-                    "playlist_id": module.playlist.playlist_id if module.playlist else "",
-                    "playlist_url": module.playlist.permalink_url if module.playlist else "",
+                    "playlist_id": playlist.playlist_id if playlist else "",
+                    "playlist_title": playlist.title if playlist else "",
+                    "playlist_url": playlist.permalink_url if playlist else "",
                 }
             )
 
@@ -490,17 +506,15 @@ def soundcloud_view(request: Request, session: Session = Depends(get_session)) -
         {
             "sc": {**summary, "sharing": prefs.soundcloud_sharing},
             "modules": modules,
+            "auto_publish": prefs.soundcloud_auto_publish,
+            "last_publish": soundcloud_publish.last_publish(session),
         },
     )
 
 
-@router.get("/innstillinger", response_class=HTMLResponse)
-def settings_view(request: Request, session: Session = Depends(get_session)) -> Any:
-    if (redirect := guard(request)) is not None:
-        return redirect
-
+def _credential_context() -> dict[str, Any]:
+    """What the field macros need to render a credential: mask, source and lock."""
     store = get_store()
-    status = build_status(session)
 
     def secret_info(key: str) -> dict[str, Any]:
         value = store.get(key)
@@ -513,19 +527,40 @@ def settings_view(request: Request, session: Session = Depends(get_session)) -> 
         }
 
     locked_keys = [SECRET_LABELS.get(key, key) for key in SECRET_KEYS if store.is_locked(key)] + [
-        key for key in ("CANVAS_URL", "SOUNDCLOUD_CLIENT_ID") if store.is_locked(key)
+        key
+        for key in ("CANVAS_URL", "SOUNDCLOUD_CLIENT_ID", "SOUNDCLOUD_REDIRECT_URI")
+        if store.is_locked(key)
     ]
+    return {"secret_info": secret_info, "locked": store.is_locked, "env_locked_keys": locked_keys}
+
+
+@router.get("/api-nokler", response_class=HTMLResponse)
+def api_keys_view(request: Request, session: Session = Depends(get_session)) -> Any:
+    """Keys and addresses — everything that is written to `.env`."""
+    if (redirect := guard(request)) is not None:
+        return redirect
+
+    return render(
+        request,
+        "api_keys.html",
+        "api",
+        {"status": build_status(session), **_credential_context()},
+    )
+
+
+@router.get("/innstillinger", response_class=HTMLResponse)
+def settings_view(request: Request, session: Session = Depends(get_session)) -> Any:
+    """Choices — everything that is stored in the database."""
+    if (redirect := guard(request)) is not None:
+        return redirect
 
     return render(
         request,
         "settings.html",
         "settings",
         {
-            "status": status,
             "prefs": load_preferences(session),
-            "secret_info": secret_info,
-            "locked": store.is_locked,
-            "env_locked_keys": locked_keys,
+            "elevenlabs_ready": bool(get_settings().elevenlabs_api_key),
         },
     )
 

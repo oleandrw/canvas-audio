@@ -217,6 +217,14 @@ class TestApiCalls:
             with pytest.raises(Exception, match="finnes ikke"):
                 await client.upload_track(file_path=tmp_path / "nope.mp3", title="X")
 
+    async def test_upload_reads_the_track_urn(self, tmp_path: Path) -> None:
+        mp3 = tmp_path / "01-velkommen.mp3"
+        mp3.write_bytes(b"ID3-fake")
+        response = {"urn": "soundcloud:tracks:2401076190", "title": "Velkommen"}
+        async with self.build(lambda _r: httpx.Response(201, json=response)) as client:
+            track = await client.upload_track(file_path=mp3, title="Velkommen")
+        assert track.track_id == "2401076190"
+
     async def test_playlist_creation_uses_the_documented_body(self) -> None:
         captured: dict[str, object] = {}
 
@@ -228,10 +236,10 @@ class TestApiCalls:
             return httpx.Response(
                 201,
                 json={
-                    "id": 999,
+                    "urn": "soundcloud:playlists:999",
                     "title": "Modul 1",
                     "permalink_url": "https://snd.sc/p",
-                    "tracks": [{"id": 1}, {"id": 2}],
+                    "tracks": [{"urn": "soundcloud:tracks:1"}, {"urn": "soundcloud:tracks:2"}],
                 },
             )
 
@@ -241,10 +249,28 @@ class TestApiCalls:
             )
 
         assert captured["url"] == "https://api.soundcloud.com/playlists"
-        assert captured["json"]["playlist"]["tracks"] == [{"id": 1}, {"id": 2}]
+        assert captured["json"]["playlist"]["tracks"] == [
+            {"urn": "soundcloud:tracks:1"},
+            {"urn": "soundcloud:tracks:2"},
+        ]
         assert captured["json"]["playlist"]["title"] == "Modul 1"
         assert info.playlist_id == "999"
+        assert info.track_ids == ["1", "2"]
         assert info.track_count == 2
+
+    async def test_track_ids_beyond_32_bits_are_sent_as_urn_strings(self) -> None:
+        """SoundCloud cannot parse ``{"id": 2401076190}``: numeric ids overflow 32 bits."""
+        captured: dict[str, bytes] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["body"] = request.read()
+            return httpx.Response(201, json={"urn": "soundcloud:playlists:1"})
+
+        async with self.build(handler) as client:
+            await client.create_playlist(title="M", track_ids=["2401076190"])
+
+        assert b'"urn":"soundcloud:tracks:2401076190"' in captured["body"]
+        assert b'"id"' not in captured["body"]
 
     async def test_playlist_update_replaces_the_full_track_list(self) -> None:
         captured: dict[str, object] = {}
@@ -255,14 +281,36 @@ class TestApiCalls:
             captured["method"] = request.method
             captured["url"] = str(request.url)
             captured["json"] = json.loads(request.read())
-            return httpx.Response(200, json={"id": 999, "title": "Modul 1", "tracks": [{"id": 3}]})
+            return httpx.Response(
+                200,
+                json={
+                    "urn": "soundcloud:playlists:999",
+                    "title": "Modul 1",
+                    "tracks": [{"urn": "soundcloud:tracks:3"}],
+                },
+            )
 
         async with self.build(handler) as client:
             await client.update_playlist("999", track_ids=["3"])
 
         assert captured["method"] == "PUT"
-        assert captured["url"] == "https://api.soundcloud.com/playlists/999"
-        assert captured["json"]["playlist"]["tracks"] == [{"id": 3}]
+        assert captured["url"] == "https://api.soundcloud.com/playlists/soundcloud:playlists:999"
+        assert captured["json"]["playlist"]["tracks"] == [{"urn": "soundcloud:tracks:3"}]
+
+    async def test_a_playlist_is_fetched_by_urn(self) -> None:
+        captured: dict[str, str] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            return httpx.Response(200, json={"urn": "soundcloud:playlists:2401", "title": "M"})
+
+        async with self.build(handler) as client:
+            info = await client.get_playlist("2401")
+
+        url = httpx.URL(captured["url"])
+        assert url.path == "/playlists/soundcloud:playlists:2401"
+        assert url.params["access"] == "playable,preview,blocked"
+        assert info.playlist_id == "2401"
 
     async def test_non_numeric_track_ids_are_dropped(self) -> None:
         captured: dict[str, object] = {}
@@ -275,7 +323,7 @@ class TestApiCalls:
 
         async with self.build(handler) as client:
             await client.create_playlist(title="M", track_ids=["12", "", "abc"])
-        assert captured["json"]["playlist"]["tracks"] == [{"id": 12}]
+        assert captured["json"]["playlist"]["tracks"] == [{"urn": "soundcloud:tracks:12"}]
 
     async def test_forbidden_explains_the_artist_pro_requirement(self) -> None:
         async with self.build(lambda _r: httpx.Response(403, json={"error": "no"})) as client:
@@ -288,3 +336,165 @@ class TestOptionalIntegration:
         result = await sc.check_connection(client_id="", client_secret="")
         assert result["ok"] is False
         assert "valgfri" in result["detail"].lower()
+
+
+class TestPlaylistListing:
+    async def test_lists_every_page_of_the_users_playlists(self) -> None:
+        calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(str(request.url))
+            if "cursor=2" in str(request.url):
+                return httpx.Response(200, json={"collection": [{"id": 3, "title": "C"}]})
+            return httpx.Response(
+                200,
+                json={
+                    "collection": [
+                        {"id": 1, "title": "A", "track_count": 5, "sharing": "private"},
+                        {"id": 2, "title": "B", "track_count": 0},
+                    ],
+                    "next_href": "https://api.soundcloud.com/me/playlists?cursor=2&show_tracks=false",
+                },
+            )
+
+        async with sc.SoundCloudClient("token", transport=httpx.MockTransport(handler)) as client:
+            playlists = await client.list_my_playlists()
+
+        assert [p.playlist_id for p in playlists] == ["1", "2", "3"]
+        assert playlists[0].public_track_count == 5
+        assert playlists[0].sharing == "private"
+        assert "show_tracks=false" in calls[0]
+        assert "linked_partitioning=true" in calls[0]
+        assert len(calls) == 2
+
+    async def test_an_empty_page_ends_the_listing(self) -> None:
+        calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(str(request.url))
+            return httpx.Response(
+                200,
+                json={"collection": [], "next_href": "https://api.soundcloud.com/me/playlists?c=x"},
+            )
+
+        async with sc.SoundCloudClient("token", transport=httpx.MockTransport(handler)) as client:
+            assert await client.list_my_playlists() == []
+        assert len(calls) == 1
+
+    async def test_a_playlist_reports_its_track_ids_in_order(self) -> None:
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, json={"id": 9, "title": "M", "tracks": [{"id": 3}, {"id": 1}, {"id": 2}]}
+            )
+
+        async with sc.SoundCloudClient("token", transport=httpx.MockTransport(handler)) as client:
+            info = await client.get_playlist("9")
+
+        assert info.track_ids == ["3", "1", "2"]
+        assert info.track_count == 3
+
+    async def test_soundcloud_track_count_is_kept_as_the_public_count(self) -> None:
+        """A private playlist reports ``track_count: 0`` however many tracks it holds."""
+        payload = {
+            "urn": "soundcloud:playlists:9",
+            "track_count": 0,
+            "tracks": [{"urn": "soundcloud:tracks:1"}, {"urn": "soundcloud:tracks:2"}],
+        }
+        transport = httpx.MockTransport(lambda _r: httpx.Response(200, json=payload))
+        async with sc.SoundCloudClient("token", transport=transport) as client:
+            info = await client.get_playlist("9")
+        assert info.track_count == 2
+        assert info.public_track_count == 0
+
+
+TRACKS_URL = "https://api.soundcloud.com/playlists/soundcloud:playlists:9/tracks"
+
+
+class TestPlaylistTracks:
+    async def test_every_page_is_read_and_blocked_tracks_are_included(self) -> None:
+        seen: list[httpx.URL] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.url)
+            if request.url.params.get("cursor") == "2":
+                return httpx.Response(200, json={"collection": [{"urn": "soundcloud:tracks:3"}]})
+            return httpx.Response(
+                200,
+                json={
+                    "collection": [{"urn": "soundcloud:tracks:1"}, {"urn": "soundcloud:tracks:2"}],
+                    "next_href": f"{TRACKS_URL}?cursor=2",
+                },
+            )
+
+        async with sc.SoundCloudClient("token", transport=httpx.MockTransport(handler)) as client:
+            track_ids = await client.list_playlist_track_ids("9")
+
+        assert track_ids == ["1", "2", "3"]
+        assert seen[0].path == "/playlists/soundcloud:playlists:9/tracks"
+        assert seen[0].params["linked_partitioning"] == "true"
+        assert [url.params["access"] for url in seen] == ["playable,preview,blocked"] * 2
+
+    async def test_a_track_that_cannot_be_identified_stops_the_read(self) -> None:
+        from app.services.errors import UpstreamError
+
+        payload = {"collection": [{"urn": "soundcloud:tracks:1"}, {"title": "uten id"}]}
+        transport = httpx.MockTransport(lambda _r: httpx.Response(200, json=payload))
+        async with sc.SoundCloudClient("token", transport=transport) as client:
+            with pytest.raises(UpstreamError, match="ikke kan lese"):
+                await client.list_playlist_track_ids("9")
+
+    async def test_an_endless_track_list_is_refused(self) -> None:
+        from app.services.errors import UpstreamError
+
+        payload = {
+            "collection": [{"urn": "soundcloud:tracks:1"}],
+            "next_href": f"{TRACKS_URL}?cursor=n&access=playable,preview,blocked",
+        }
+        transport = httpx.MockTransport(lambda _r: httpx.Response(200, json=payload))
+        async with sc.SoundCloudClient("token", transport=transport) as client:
+            with pytest.raises(UpstreamError, match="endrer den ikke"):
+                await client.list_playlist_track_ids("9", max_pages=3)
+
+
+ME_TRACKS_URL = "https://api.soundcloud.com/me/tracks"
+
+
+class TestTrackLookup:
+    async def test_the_accounts_own_tracks_are_listed_across_pages(self) -> None:
+        seen: list[httpx.URL] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.url)
+            if request.url.params.get("cursor") == "2":
+                # SoundCloud ends with an empty page that still has a next_href.
+                return httpx.Response(
+                    200, json={"collection": [], "next_href": f"{ME_TRACKS_URL}?cursor=3"}
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "collection": [{"urn": "soundcloud:tracks:1"}, {"urn": "soundcloud:tracks:2"}],
+                    "next_href": f"{ME_TRACKS_URL}?cursor=2",
+                },
+            )
+
+        async with sc.SoundCloudClient("token", transport=httpx.MockTransport(handler)) as client:
+            assert await client.list_my_track_ids() == {"1", "2"}
+        assert seen[0].path == "/me/tracks"
+        assert seen[0].params["limit"] == "200"
+        assert len(seen) == 2
+
+    async def test_a_track_is_missing_only_when_soundcloud_answers_404(self) -> None:
+        from app.services.errors import ServiceError
+
+        statuses = {"1": 200, "2": 404, "3": 500}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            track_id = request.url.path.rsplit(":", 1)[-1]
+            return httpx.Response(statuses[track_id], json={"urn": f"soundcloud:tracks:{track_id}"})
+
+        async with sc.SoundCloudClient("token", transport=httpx.MockTransport(handler)) as client:
+            assert await client.track_exists("1") is True
+            assert await client.track_exists("2") is False
+            with pytest.raises(ServiceError):
+                await client.track_exists("3")

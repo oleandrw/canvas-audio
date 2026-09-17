@@ -7,7 +7,9 @@ voice, the monthly budget and the confirmation threshold.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -32,7 +34,21 @@ DEFAULTS: dict[str, str] = {
     "cost_confirm_threshold_usd": "5",
     "filename_style": "slug",
     "soundcloud_sharing": "private",
+    "soundcloud_auto_publish": "0",
+    "canvas_player_style": "kort",
+    "canvas_player_color": "#0b5bd3",
+    "canvas_player_label": "Lytt til denne siden",
+    "canvas_player_icon": "🎧",
+    "canvas_audio_folder": "Lydfiler",
 }
+
+#: Written by the app itself, never by the settings form. Deliberately outside
+#: DEFAULTS: set_many() ignores unknown keys and the settings status only exports
+#: DEFAULTS, so these can neither be posted from the GUI nor leak into it.
+SCHEMA_VERSION_KEY = "schema_version"
+SCHEMA_CHECKED_AT_KEY = "schema_checked_at"
+SCHEMA_ADDED_COLUMNS_KEY = "schema_added_columns"
+LAST_UPDATE_KEY = "last_update"
 
 VALID_FILENAME_STYLES = ("slug", "title")
 VALID_SHARING = ("private", "public")
@@ -94,6 +110,7 @@ class Preferences:
     cost_confirm_threshold_usd: float
     filename_style: str
     soundcloud_sharing: str
+    soundcloud_auto_publish: bool = False
 
     @property
     def tts_ready(self) -> bool:
@@ -123,7 +140,38 @@ def load_preferences(session: Session) -> Preferences:
         cost_confirm_threshold_usd=get_float(session, "cost_confirm_threshold_usd", 5.0),
         filename_style=filename_style if filename_style in VALID_FILENAME_STYLES else "slug",
         soundcloud_sharing=sharing if sharing in VALID_SHARING else "private",
+        soundcloud_auto_publish=get_bool(session, "soundcloud_auto_publish"),
     )
+
+
+def record_schema_state(session: Session, version: int, added_columns: list[str]) -> None:
+    """Remember what the last startup did to the database, for the update page."""
+    set_value(session, SCHEMA_VERSION_KEY, str(version))
+    set_value(session, SCHEMA_CHECKED_AT_KEY, datetime.now(UTC).isoformat(timespec="seconds"))
+    set_value(session, SCHEMA_ADDED_COLUMNS_KEY, " ".join(added_columns))
+
+
+def read_schema_state(session: Session) -> dict[str, Any]:
+    return {
+        "version": get_int(session, SCHEMA_VERSION_KEY, 0),
+        "checked_at": get_value(session, SCHEMA_CHECKED_AT_KEY),
+        "added_columns": get_value(session, SCHEMA_ADDED_COLUMNS_KEY).split(),
+    }
+
+
+def record_last_update(session: Session, record: dict[str, Any]) -> None:
+    set_value(session, LAST_UPDATE_KEY, json.dumps(record, ensure_ascii=False))
+
+
+def read_last_update(session: Session) -> dict[str, Any] | None:
+    raw = get_value(session, LAST_UPDATE_KEY)
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def all_values(session: Session) -> dict[str, str]:

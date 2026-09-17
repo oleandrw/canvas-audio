@@ -12,9 +12,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any, TypeVar
 
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Engine, create_engine, event, inspect, literal
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import get_settings
@@ -96,11 +97,101 @@ async def run_db(func: Callable[[Session], T]) -> T:
     return await asyncio.to_thread(_runner)
 
 
-def init_db() -> None:
-    """Create tables. Schema is simple enough that Alembic is not warranted yet."""
+#: Bumped by hand when a model gains a table or a column. There are no numbered
+#: migrations — :func:`add_missing_columns` brings an older database up to date at
+#: startup — so this is the label the update page shows, next to the columns that
+#: were actually added.
+SCHEMA_VERSION = 1
+
+
+@dataclass(slots=True)
+class SchemaState:
+    """What :func:`init_db` did on this start."""
+
+    version: int
+    added_columns: list[str]
+
+
+_last_schema_state: SchemaState | None = None
+
+
+def init_db() -> SchemaState:
+    """Create tables and add new columns. Simple enough that Alembic is not warranted."""
+    global _last_schema_state
     from app.models import core  # noqa: F401  (import registers the mappers)
 
-    core.Base.metadata.create_all(bind=get_engine())
+    engine = get_engine()
+    core.Base.metadata.create_all(bind=engine)
+    added = add_missing_columns(engine, core.Base.metadata)
+    _stamp_schema_version(engine)
+    _last_schema_state = SchemaState(version=SCHEMA_VERSION, added_columns=added)
+    return _last_schema_state
+
+
+def last_schema_state() -> SchemaState | None:
+    """What the last :func:`init_db` in this process did, or ``None`` before it ran."""
+    return _last_schema_state
+
+
+def _stamp_schema_version(engine: Engine) -> None:
+    """Write the version into the SQLite file, so a copied database still says what it is."""
+    if engine.dialect.name != "sqlite":
+        return
+    with engine.begin() as connection:
+        # A module constant, never input, so the f-string is safe here.
+        connection.exec_driver_sql(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
+
+
+def file_schema_version() -> int | None:
+    """The version stamped in the database file, or ``None`` when it is not SQLite."""
+    engine = get_engine()
+    if engine.dialect.name != "sqlite":
+        return None
+    with engine.connect() as connection:
+        return int(connection.exec_driver_sql("PRAGMA user_version").scalar() or 0)
+
+
+def add_missing_columns(engine: Engine, metadata: Any) -> list[str]:
+    """Add columns that models gained after an existing database was created.
+
+    ``create_all`` only creates missing tables, so an older database would lack
+    new columns. Only additions are handled, and a new column that cannot be
+    empty needs a constant default so existing rows get a value.
+    Returns the added columns as ``table.column``.
+    """
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    added: list[str] = []
+    with engine.begin() as connection:
+        for table in metadata.sorted_tables:
+            if table.name not in existing_tables:
+                continue
+            present = {column["name"] for column in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name in present:
+                    continue
+                ddl_type = column.type.compile(dialect=engine.dialect)
+                default = column.default.arg if column.default is not None else None
+                if default is None or callable(default):
+                    if not column.nullable:
+                        raise RuntimeError(
+                            f"Cannot add {table.name}.{column.name}: it needs a constant default"
+                        )
+                    clause = ""
+                else:
+                    rendered = literal(default).compile(
+                        dialect=engine.dialect, compile_kwargs={"literal_binds": True}
+                    )
+                    clause = (
+                        f" DEFAULT {rendered}"
+                        if column.nullable
+                        else f" NOT NULL DEFAULT {rendered}"
+                    )
+                connection.exec_driver_sql(
+                    f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {ddl_type}{clause}'
+                )
+                added.append(f"{table.name}.{column.name}")
+    return added
 
 
 def reset_engine() -> None:

@@ -29,7 +29,12 @@ from app.models.core import (
     UsageRecord,
 )
 from app.pricing import load_pricing
-from app.services import anthropic_service, elevenlabs_service, openai_service
+from app.services import (
+    anthropic_service,
+    elevenlabs_service,
+    openai_service,
+    soundcloud_publish,
+)
 from app.services.app_settings import load_preferences
 from app.services.audio_service import build_relative_path, write_audio
 from app.services.errors import InvalidContentError, ServiceError
@@ -457,6 +462,9 @@ async def run_job(
             await client.aclose()
         await run_db(lambda session: finish_job(session, job_id, cancelled=cancelled))
         logger.info("Generation job finished id=%s cancelled=%s", job_id, cancelled)
+        if not cancelled:
+            # Best-effort follow-up: this never raises into the job.
+            await soundcloud_publish.publish_after_job(job_id)
 
 
 def _fail_job(session: Session, job_id: int, message: str) -> None:

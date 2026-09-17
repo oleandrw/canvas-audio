@@ -117,8 +117,9 @@ def save_settings(
     written: list[str] = []
     skipped: list[str] = []
     if env_updates:
-        written, skipped = get_store().update(env_updates)
-        reset_store()
+        store = get_store()
+        written, skipped = store.update(env_updates)
+        reset_store(store.env_path)  # keep writing to the same file we just wrote
 
     preferences = {k: v for k, v in data.items() if k in DEFAULTS}
     if preferences:

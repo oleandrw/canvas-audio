@@ -1,6 +1,11 @@
-{# Reusable form fragments. #}
+{# Reusable form fragments.
 
-{% macro secret_field(field_id, config_key, hint="") -%}
+   Both settings pages build their fields from these macros, so the shared logic in
+   static/js/settings.js can find every field through data-setting / data-kind and
+   every test field through data-test-provider. `hint` is template-authored markup,
+   never user input, so it is rendered unescaped. #}
+
+{% macro secret_field(field_id, config_key, hint="", provider="", removable=False) -%}
 {% set info = secret_info(config_key) %}
 <div class="field">
   <label for="{{ field_id }}">
@@ -13,11 +18,37 @@
     {% if info.locked %}<span class="badge badge-info">Fra miljøvariabel</span>{% endif %}
   </label>
   <input type="password" id="{{ field_id }}" autocomplete="new-password"
+         data-setting="{{ field_id }}" data-kind="secret"
+         {% if provider %}data-test-provider="{{ provider }}"{% endif %}
          placeholder="{{ 'Styres av miljøvariabel' if info.locked else ('Skriv inn ny verdi for å endre' if info.configured else 'Ikke satt') }}"
          {{ "disabled" if info.locked }}>
-  {% if hint %}<p class="field-hint">{{ hint }}</p>{% endif %}
+  {% if hint %}<p class="field-hint">{{ hint|safe }}</p>{% endif %}
   {% if info.locked %}
   <p class="field-hint">Verdien kommer fra prosessmiljøet og kan ikke endres fra GUI-et.</p>
+  {% elif removable and info.configured %}
+  <div class="btn-row" style="margin-top: var(--space-2);">
+    <button class="btn btn-ghost btn-sm"
+            onclick="clearSecret('{{ field_id }}', {{ info.label|tojson }}, this)">Fjern</button>
+  </div>
   {% endif %}
 </div>
+{%- endmacro %}
+
+{% macro plain_field(field_id, label, value, hint="", type="text", config_key="", provider="", placeholder="") -%}
+{% set is_locked = config_key and locked(config_key) %}
+<div class="field">
+  <label for="{{ field_id }}">
+    {{ label }}
+    {% if is_locked %}<span class="badge badge-info">Fra miljøvariabel</span>{% endif %}
+  </label>
+  <input type="{{ type }}" id="{{ field_id }}" value="{{ value }}" placeholder="{{ placeholder }}"
+         data-setting="{{ field_id }}" data-kind="text"
+         {% if provider %}data-test-provider="{{ provider }}"{% endif %}
+         {{ "disabled" if is_locked }}>
+  {% if hint %}<p class="field-hint">{{ hint|safe }}</p>{% endif %}
+</div>
+{%- endmacro %}
+
+{% macro test_button(provider, label) -%}
+<button class="btn btn-ghost" onclick="testProvider('{{ provider }}', this)">🔌 Test {{ label }}</button>
 {%- endmacro %}

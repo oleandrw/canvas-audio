@@ -1,0 +1,338 @@
+{% extends "base.html" %}
+{% block title %}Publiser i Canvas · Canvas → Lyd{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1>📤 Publiser i Canvas</h1>
+    <p class="subtitle">
+      Lydfilene lastes opp til Filer i emnet, én mappe per modul, og hver side får en avspiller
+      øverst. Innholdet på siden ellers blir ikke endret.
+    </p>
+  </div>
+</div>
+
+{% if not canvas_configured %}
+<div class="alert alert-warn">
+  <span class="alert-icon">⚠️</span>
+  <div>Canvas-URL og token er ikke satt. <a href="/api-nokler">Gå til 🔑 API</a>.</div>
+</div>
+{% elif not course %}
+<div class="alert alert-warn">
+  <span class="alert-icon">⚠️</span>
+  <div>Velg og synkroniser et emne først. <a href="/canvas">Gå til Canvas</a>.</div>
+</div>
+{% endif %}
+
+<section class="section">
+  <div class="card">
+    <div class="card-header">
+      <h2>Utseende</h2>
+      <span class="spacer badge badge-muted" id="design-dirty" hidden>Ikke lagret</span>
+    </div>
+
+    <div class="design-grid">
+      <div>
+        <div class="field">
+          <label>Design</label>
+          <div class="option-row" id="style-options">
+            {% for key, label in styles.items() %}
+            <label class="option-chip {{ 'active' if key == design.style }}">
+              <input type="radio" name="style" value="{{ key }}" {{ "checked" if key == design.style }}>
+              {{ label }}
+            </label>
+            {% endfor %}
+          </div>
+        </div>
+
+        <div class="field">
+          <label>Farge</label>
+          <div class="option-row" id="color-options">
+            {% for key, (label, hex) in colors.items() %}
+            <button type="button" class="swatch {{ 'active' if hex == design.color }}" data-color="{{ hex }}"
+                    title="{{ label }}" aria-label="{{ label }}" style="background: {{ hex }};"></button>
+            {% endfor %}
+            <input type="color" class="color-input" id="color" value="{{ design.color }}" title="Egen farge">
+          </div>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="label">Tekst</label>
+            <input type="text" id="label" maxlength="80" value="{{ design.label }}">
+          </div>
+          <div class="field">
+            <label for="icon">Ikon</label>
+            <select id="icon">
+              {% for value, label in icons.items() %}
+              <option value="{{ value }}" {{ "selected" if value == design.icon }}>{{ (value ~ " " ~ label) if value else label }}</option>
+              {% endfor %}
+            </select>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="folder">Mappe i Filer</label>
+          <input type="text" id="folder" maxlength="100" value="{{ folder }}">
+          <p class="field-hint">
+            Hver modul får en undermappe, for eksempel «{{ folder }}/01 {{ modules[0].name if modules else "Modul 1" }}».
+          </p>
+        </div>
+
+        <div class="btn-row">
+          <button class="btn btn-primary" onclick="saveDesign(this)">💾 Lagre utseende</button>
+        </div>
+      </div>
+
+      <div>
+        <div class="canvas-preview-label">Forhåndsvisning{% if sample %} med lyden fra «{{ sample.title }}»{% endif %}</div>
+        <div class="canvas-preview">
+          <h1>{{ sample.title if sample else "Tittel på siden" }}</h1>
+          <div id="player-preview">{{ preview_html | safe }}</div>
+          <p>{{ sample.excerpt if sample else "Her kommer innholdet på siden, akkurat som før." }}…</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="run-section" {{ "hidden" if not run }}>
+  <div class="card">
+    <div class="card-header">
+      <h2 id="run-title">Publisering</h2>
+      <span class="spacer badge" id="run-badge"></span>
+    </div>
+    <div class="progress"><div class="progress-bar" id="run-bar" style="width: 0%;"></div></div>
+    <p class="muted" id="run-text" style="margin-top: var(--space-3);"></p>
+    <div id="run-failures"></div>
+  </div>
+</section>
+
+{% if course %}
+<section class="section">
+  <div class="section-title">Moduler i «{{ course.name }}»</div>
+  {% if modules %}
+  <div class="btn-row" style="margin-bottom: var(--space-4);">
+    <button class="btn btn-primary" onclick="startRun('publish', null, this)"
+            data-count="{{ totals.ready }}" {{ "disabled" if not canvas_configured or not totals.ready }}>
+      📤 Publiser alle moduler
+    </button>
+    <button class="btn btn-ghost" onclick="startRun('remove', null, this)"
+            data-count="{{ totals.on_canvas }}" {{ "disabled" if not canvas_configured or not totals.on_canvas }}>
+      Fjern alle avspillere
+    </button>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Modul</th>
+          <th class="right">Lyd klar</th>
+          <th class="right">Publisert</th>
+          <th class="right">Må oppdateres</th>
+          <th class="right">Handling</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in modules %}
+        <tr>
+          <td>{{ row.name }}</td>
+          <td class="right nowrap">{{ row.ready }} / {{ row.pages }}</td>
+          <td class="right nowrap">
+            {{ row.published }}
+            {% if row.failed %}<span class="badge badge-error">{{ row.failed }} feilet</span>{% endif %}
+          </td>
+          <td class="right">
+            {% if row.outdated %}<span class="badge badge-warn">{{ row.outdated }}</span>{% else %}<span class="dim">—</span>{% endif %}
+          </td>
+          <td class="right nowrap">
+            <button class="btn btn-ghost btn-sm" onclick="startRun('publish', [{{ row.id }}], this)"
+                    data-count="{{ row.ready }}" {{ "disabled" if not canvas_configured or not row.ready }}>Publiser</button>
+            <button class="btn btn-ghost btn-sm" onclick="startRun('remove', [{{ row.id }}], this)"
+                    data-count="{{ row.on_canvas }}" {{ "disabled" if not canvas_configured or not row.on_canvas }}>Fjern</button>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state"><span class="emoji">🗂️</span>Emnet har ingen moduler ennå.</div>
+  {% endif %}
+</section>
+{% endif %}
+
+<section class="section">
+  <div class="alert alert-info">
+    <span class="alert-icon">ℹ️</span>
+    <div>
+      <strong>Slik fungerer det</strong>
+      <ul style="margin: var(--space-2) 0 0; padding-left: var(--space-5);">
+        <li>Bare sider med oppdatert lyd publiseres. En lydfil som allerede ligger i Canvas, lastes ikke opp på nytt.</li>
+        <li>Avspilleren legges øverst på siden. Publiserer du igjen, byttes den ut i stedet for at det blir to.</li>
+        <li>Canvas tar vare på forrige versjon av hver side under «Vis sidehistorikk», og ingen får varsel om endringen.</li>
+        <li>«Fjern» tar avspilleren bort fra sidene. Lydfilene blir liggende i Filer.</li>
+        <li>Teksten i avspilleren blir aldri en del av det som leses opp.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const samplePageId = {{ sample.id if sample else "null" }};
+  const courseName = {{ (course.name if course else "") | tojson }};
+  let pollTimer = null;
+  let previewTimer = null;
+
+  function esc(value) {
+    const box = document.createElement("div");
+    box.textContent = value == null ? "" : String(value);
+    return box.innerHTML;
+  }
+
+  function currentDesign() {
+    return {
+      style: document.querySelector('input[name="style"]:checked').value,
+      color: document.getElementById("color").value,
+      label: document.getElementById("label").value,
+      icon: document.getElementById("icon").value,
+      folder: document.getElementById("folder").value,
+    };
+  }
+
+  function markDirty() {
+    document.getElementById("design-dirty").hidden = false;
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(updatePreview, 250);
+  }
+
+  async function updatePreview() {
+    const body = Object.assign(currentDesign(), { page_id: samplePageId });
+    const result = await api("/api/canvas-player/preview", { method: "POST", body: body });
+    if (result.ok) document.getElementById("player-preview").innerHTML = result.data.html;
+  }
+
+  async function saveDesign(button) {
+    const run = async function () {
+      const result = await api("/api/canvas-player/design", { method: "PUT", body: currentDesign() });
+      if (!result.ok) {
+        toast(errorMessage(result, "Kunne ikke lagre utseendet."), "error");
+        return false;
+      }
+      document.getElementById("design-dirty").hidden = true;
+      if (button) toast(result.data.message, "ok");
+      return true;
+    };
+    return button ? withBusy(button, run) : run();
+  }
+
+  document.querySelectorAll('input[name="style"]').forEach(function (input) {
+    input.addEventListener("change", function () {
+      document.querySelectorAll("#style-options .option-chip").forEach(function (chip) {
+        chip.classList.toggle("active", chip.contains(input) && input.checked);
+      });
+      markDirty();
+    });
+  });
+
+  function selectColor(hex) {
+    document.getElementById("color").value = hex;
+    document.querySelectorAll(".swatch").forEach(function (swatch) {
+      swatch.classList.toggle("active", swatch.dataset.color === hex);
+    });
+    markDirty();
+  }
+
+  document.querySelectorAll(".swatch").forEach(function (swatch) {
+    swatch.addEventListener("click", function () { selectColor(swatch.dataset.color); });
+  });
+  document.getElementById("color").addEventListener("input", function (event) {
+    selectColor(event.target.value);
+  });
+  ["label", "icon", "folder"].forEach(function (id) {
+    document.getElementById(id).addEventListener("input", markDirty);
+  });
+
+  async function startRun(action, moduleIds, button) {
+    const count = Number(button.dataset.count || 0);
+    const where = moduleIds ? "modulen" : "alle modulene i «" + courseName + "»";
+    const confirmed = action === "remove"
+      ? await confirmDialog(
+          "Fjerne avspillere?",
+          "Avspilleren fjernes fra " + count + " sider i " + where + ". Lydfilene blir liggende i Filer.",
+          "Fjern avspillere")
+      : await confirmDialog(
+          "Publisere i Canvas?",
+          "Opptil " + count + " sider i " + where + " får avspiller øverst, og lydfilene som mangler, " +
+          "lastes opp til Filer. Canvas tar vare på forrige versjon av hver side.",
+          "Publiser");
+    if (!confirmed) return;
+
+    await withBusy(button, async function () {
+      if (action === "publish" && !document.getElementById("design-dirty").hidden) {
+        if (!(await saveDesign(null))) return;
+      }
+      const result = await api("/api/canvas-player/runs", {
+        method: "POST",
+        body: { action: action, module_ids: moduleIds },
+      });
+      if (!result.ok) return toast(errorMessage(result, "Kunne ikke starte."), "error");
+      showRun(result.data);
+      poll();
+    });
+  }
+
+  function showRun(run) {
+    if (!run) return;
+    document.getElementById("run-section").hidden = false;
+    const removing = run.action === "remove";
+    document.getElementById("run-title").textContent = run.running
+      ? (removing ? "Fjerner avspillere" : "Publiserer i Canvas")
+      : (removing ? "Fjerning av avspillere er ferdig" : "Publiseringen er ferdig");
+    const percent = run.total ? Math.round((run.done / run.total) * 100) : 100;
+    document.getElementById("run-bar").style.width = percent + "%";
+
+    const badge = document.getElementById("run-badge");
+    const failed = run.counts.failed || 0;
+    badge.className = "spacer badge " + (run.running ? "badge-brand" : (run.error || failed ? "badge-warn" : "badge-ok"));
+    badge.textContent = run.running ? run.done + " / " + run.total : "Ferdig";
+
+    document.getElementById("run-text").textContent = run.running
+      ? (run.current ? "Nå: " + run.current : "Starter …")
+      : run.summary;
+
+    const problems = run.outcomes.filter(function (o) {
+      return o.status === "failed" || (o.status === "published" && o.message.indexOf("merkingen") !== -1);
+    });
+    document.getElementById("run-failures").innerHTML = problems.length
+      ? '<div class="cost-lines" style="margin-top: var(--space-4);">' + problems.map(function (o) {
+          return '<div class="cost-line"><span>' + esc(o.title) + '</span><span class="dim">' + esc(o.message) + "</span></div>";
+        }).join("") + "</div>"
+      : "";
+  }
+
+  async function poll() {
+    clearTimeout(pollTimer);
+    const result = await api("/api/canvas-player/runs/current");
+    const run = result.ok ? result.data.run : null;
+    if (!run) return;
+    showRun(run);
+    if (run.running) {
+      pollTimer = setTimeout(poll, 1500);
+    } else {
+      toast(run.summary, run.error || run.counts.failed ? "error" : "ok");
+      setTimeout(function () { location.reload(); }, 2500);
+    }
+  }
+
+  document.addEventListener("DOMContentLoaded", function () {
+    const run = {{ run | tojson }};
+    if (run) {
+      showRun(run);
+      if (run.running) poll();
+    }
+  });
+</script>
+{% endblock %}

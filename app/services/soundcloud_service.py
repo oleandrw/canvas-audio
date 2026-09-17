@@ -10,8 +10,10 @@ https://developers.soundcloud.com/docs/api/guide, September 2026):
 * **Upload** — ``POST /tracks`` as multipart with ``track[title]``,
   ``track[description]``, ``track[sharing]`` and ``track[asset_data]``.
 * **Playlists** — ``POST /playlists`` with a JSON ``playlist`` object containing
-  a ``tracks`` array of ``{"id": N}``; update with ``PUT /playlists/{id}``,
-  sending the complete track list again.
+  a ``tracks`` array of ``{"urn": "soundcloud:tracks:N"}``; update with
+  ``PUT /playlists/{playlist_urn}``, sending the complete track list again.
+  Numeric ``id`` fields are deprecated because ids no longer fit in 32 bits
+  (openapi/api.yaml in github.com/soundcloud/api, api#448).
 
 Known limitations, documented in the README and shown in the GUI:
 
@@ -25,7 +27,7 @@ entry point here fails softly with :class:`SoundCloudNotConnected`.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -38,7 +40,12 @@ from app.database import run_db
 from app.logging_config import get_logger
 from app.models.core import OAuthToken
 from app.security import get_cipher
-from app.services.errors import ConfigurationError, SoundCloudNotConnected, UpstreamError
+from app.services.errors import (
+    ConfigurationError,
+    NotFoundError,
+    SoundCloudNotConnected,
+    UpstreamError,
+)
 from app.services.http import build_client, raise_for_status, with_retries
 
 logger = get_logger("app.services.soundcloud")
@@ -79,7 +86,13 @@ class PlaylistInfo:
     playlist_id: str
     title: str
     permalink_url: str
+    #: Tracks listed in this response.
     track_count: int
+    track_ids: list[str] = field(default_factory=list)
+    sharing: str = ""
+    #: SoundCloud's own ``track_count``. It only counts *public* tracks, so a private
+    #: playlist reports 0 however many tracks it holds (api#210, api#253).
+    public_track_count: int = 0
 
 
 # --------------------------------------------------------------------------- #
@@ -336,7 +349,7 @@ class SoundCloudClient:
             response = await self._request("POST", "/tracks", data=data, files=files)
 
         payload = response.json()
-        track_id = str(payload.get("id") or "")
+        track_id = _numeric_id(payload, "tracks")
         if not track_id:
             raise UpstreamError("SoundCloud returnerte ingen track-ID.", provider=PROVIDER)
         logger.info("SoundCloud upload completed track_id=%s title=%s", track_id, title)
@@ -363,30 +376,160 @@ class SoundCloudClient:
     async def update_playlist(self, playlist_id: str, *, track_ids: list[str]) -> PlaylistInfo:
         """Replace the playlist's tracks. SoundCloud expects the complete list."""
         body = {"playlist": {"tracks": _track_refs(track_ids)}}
-        payload = (await self._request("PUT", f"/playlists/{playlist_id}", json=body)).json()
+        url = f"/playlists/{_playlist_urn(playlist_id)}"
+        payload = (await self._request("PUT", url, json=body)).json()
         return _playlist_info(payload, fallback_title="")
 
     async def get_playlist(self, playlist_id: str) -> PlaylistInfo:
-        payload = (await self._request("GET", f"/playlists/{playlist_id}")).json()
+        url = f"/playlists/{_playlist_urn(playlist_id)}"
+        payload = (await self._request("GET", url, params={"access": ALL_ACCESS})).json()
         return _playlist_info(payload, fallback_title="")
 
+    async def list_playlist_track_ids(self, playlist_id: str, *, max_pages: int = 100) -> list[str]:
+        """Every track in a playlist, in order (``GET /playlists/{urn}/tracks``), all pages.
 
-def _track_refs(track_ids: list[str]) -> list[dict[str, int]]:
-    refs: list[dict[str, int]] = []
+        The tracks embedded in a playlist object are not enough to rewrite it: that
+        list may be cut short, and tracks the account cannot play are left out unless
+        ``access`` includes ``blocked``, so a PUT built from it would remove them. A
+        track this cannot identify stops the read instead of being skipped.
+        """
+        track_ids: list[str] = []
+        url = f"/playlists/{_playlist_urn(playlist_id)}/tracks"
+        params: dict[str, Any] | None = {"access": ALL_ACCESS, "linked_partitioning": "true"}
+        for _ in range(max_pages):
+            payload = (await self._request("GET", url, params=params)).json()
+            items = payload.get("collection") if isinstance(payload, dict) else payload
+            for item in items or []:
+                track_id = _numeric_id(item, "tracks") if isinstance(item, dict) else ""
+                if not track_id:
+                    raise UpstreamError(
+                        "SoundCloud sendte et spor i spillelisten som appen ikke kan lese.",
+                        provider=PROVIDER,
+                    )
+                track_ids.append(track_id)
+            next_href = payload.get("next_href") if isinstance(payload, dict) else None
+            if not next_href or not items:
+                return track_ids
+            # httpx replaces a URL's query string with ``params``, which would drop
+            # the cursor, so ``access`` is merged into next_href itself when missing.
+            next_url = httpx.URL(str(next_href))
+            if "access" not in next_url.params:
+                next_url = next_url.copy_merge_params({"access": ALL_ACCESS})
+            url, params = str(next_url), None
+        raise UpstreamError(
+            "Spillelisten har flere sider med spor enn appen leser. Appen endrer den ikke.",
+            provider=PROVIDER,
+        )
+
+    async def list_my_track_ids(self, *, max_pages: int = 50) -> set[str]:
+        """Ids of every track on the connected account (``GET /me/tracks``), all pages.
+
+        Unlike the ``/tracks`` search, which leaves private tracks out, this lists the
+        account's own private tracks too. An empty page ends the list.
+        """
+        track_ids: set[str] = set()
+        url = "/me/tracks"
+        params: dict[str, Any] | None = {"linked_partitioning": "true", "limit": 200}
+        for _ in range(max_pages):
+            payload = (await self._request("GET", url, params=params)).json()
+            items = payload.get("collection") if isinstance(payload, dict) else payload
+            for item in items or []:
+                if isinstance(item, dict) and (track_id := _numeric_id(item, "tracks")):
+                    track_ids.add(track_id)
+            next_href = payload.get("next_href") if isinstance(payload, dict) else None
+            if not next_href or not items:
+                return track_ids
+            url, params = str(next_href), None
+        raise UpstreamError(
+            "SoundCloud-kontoen har flere sider med spor enn appen leser.", provider=PROVIDER
+        )
+
+    async def track_exists(self, track_id: str) -> bool:
+        """False only when SoundCloud answers 404 for the track. Other errors raise."""
+        try:
+            await self._request("GET", f"/tracks/soundcloud:tracks:{track_id}")
+        except NotFoundError:
+            return False
+        return True
+
+    async def list_my_playlists(self, *, max_pages: int = 20) -> list[PlaylistInfo]:
+        """The authenticated user's playlists (``GET /me/playlists``), all pages.
+
+        Documented pagination: ``linked_partitioning=true`` returns a
+        ``collection`` and a ``next_href`` that is absent on the last page. An
+        empty page can still carry a ``next_href`` (api#485), so it ends the list.
+        """
+        playlists: list[PlaylistInfo] = []
+        url = "/me/playlists"
+        params: dict[str, Any] | None = {
+            "show_tracks": "false",
+            "linked_partitioning": "true",
+            "limit": 50,
+        }
+        for _ in range(max_pages):
+            payload = (await self._request("GET", url, params=params)).json()
+            items = payload.get("collection") if isinstance(payload, dict) else payload
+            for item in items or []:
+                if isinstance(item, dict) and _numeric_id(item, "playlists"):
+                    playlists.append(_playlist_info(item, fallback_title=""))
+            next_href = payload.get("next_href") if isinstance(payload, dict) else None
+            if not next_href or not items:
+                break
+            url, params = str(next_href), None
+        return playlists
+
+
+#: Ask for every track, including ones the account cannot play. The default,
+#: ``playable,preview``, leaves blocked tracks out of a playlist's track list.
+ALL_ACCESS = "playable,preview,blocked"
+
+# SoundCloud ids no longer fit in 32 bits, so the API deprecated the numeric ``id``
+# for string URNs such as ``soundcloud:tracks:123``. A playlist body that lists
+# tracks as ``{"id": 2401076190}`` is rejected with "Could not parse JSON request
+# body". Ids are stored as plain digits and turned into URNs at the API boundary.
+# https://developers.soundcloud.com/blog/urn-num-to-string/
+
+
+def _numeric_id(payload: dict[str, Any], kind: str) -> str:
+    """Digits of a ``soundcloud:<kind>:<n>`` URN, falling back to the old ``id``."""
+    urn = payload.get("urn")
+    prefix = f"soundcloud:{kind}:"
+    if isinstance(urn, str) and urn.startswith(prefix) and urn[len(prefix) :].isdigit():
+        return urn[len(prefix) :]
+    legacy = str(payload.get("id") or "")
+    return legacy if legacy.isdigit() else ""
+
+
+def _playlist_urn(playlist_id: str) -> str:
+    text = str(playlist_id).strip()
+    return text if text.startswith("soundcloud:playlists:") else f"soundcloud:playlists:{text}"
+
+
+def _track_refs(track_ids: list[str]) -> list[dict[str, str]]:
+    refs: list[dict[str, str]] = []
     for track_id in track_ids:
         text = str(track_id).strip()
         if text.isdigit():
-            refs.append({"id": int(text)})
+            refs.append({"urn": f"soundcloud:tracks:{text}"})
     return refs
 
 
 def _playlist_info(payload: dict[str, Any], *, fallback_title: str) -> PlaylistInfo:
-    tracks = payload.get("tracks") or []
+    tracks = payload.get("tracks")
+    track_ids = [
+        track_id
+        for track in (tracks if isinstance(tracks, list) else [])
+        if isinstance(track, dict) and (track_id := _numeric_id(track, "tracks"))
+    ]
+    public_count = payload.get("track_count")
     return PlaylistInfo(
-        playlist_id=str(payload.get("id") or ""),
+        playlist_id=_numeric_id(payload, "playlists"),
         title=payload.get("title") or fallback_title,
         permalink_url=payload.get("permalink_url") or "",
-        track_count=len(tracks) if isinstance(tracks, list) else 0,
+        track_count=len(track_ids),
+        track_ids=track_ids,
+        sharing=str(payload.get("sharing") or ""),
+        public_track_count=public_count if isinstance(public_count, int) else 0,
     )
 
 

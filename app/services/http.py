@@ -42,6 +42,7 @@ def build_client(
     headers: dict[str, str] | None = None,
     timeout: float | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
+    follow_redirects: bool = True,
 ) -> httpx.AsyncClient:
     """Create an ``AsyncClient``.
 
@@ -54,7 +55,7 @@ def build_client(
         headers=headers or {},
         timeout=httpx.Timeout(timeout or settings.http_timeout, connect=15.0),
         transport=transport,
-        follow_redirects=True,
+        follow_redirects=follow_redirects,
     )
 
 

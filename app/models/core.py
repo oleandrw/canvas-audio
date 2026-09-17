@@ -175,6 +175,9 @@ class Page(Base):
     soundcloud_track: Mapped[SoundCloudTrack | None] = relationship(
         back_populates="page", uselist=False, cascade="all, delete-orphan"
     )
+    canvas_embed: Mapped[CanvasEmbed | None] = relationship(
+        back_populates="page", uselist=False, cascade="all, delete-orphan"
+    )
 
     # -- derived helpers -------------------------------------------------
 
@@ -325,6 +328,9 @@ class SoundCloudTrack(Base):
     title: Mapped[str] = mapped_column(String(500), default="")
     permalink_url: Mapped[str] = mapped_column(String(1000), default="")
     file_hash: Mapped[str] = mapped_column(String(64), default="")
+    #: Earlier track ids for this page, space separated. When the audio is
+    #: regenerated and uploaded again, playlists get the new id in their place.
+    replaced_track_ids: Mapped[str] = mapped_column(Text, default="")
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     page: Mapped[Page] = relationship(back_populates="soundcloud_track")
@@ -344,6 +350,34 @@ class SoundCloudPlaylist(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     module: Mapped[Module] = relationship(back_populates="playlist")
+
+
+# --------------------------------------------------------------------------- #
+# Canvas audio player
+# --------------------------------------------------------------------------- #
+
+
+class CanvasEmbed(Base):
+    """A page's audio uploaded to Canvas Files and shown in a player on the page."""
+
+    __tablename__ = "canvas_embeds"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    page_id: Mapped[int] = mapped_column(
+        ForeignKey("pages.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    file_id: Mapped[str] = mapped_column(String(64), default="")
+    file_hash: Mapped[str] = mapped_column(String(64), default="")
+    folder_path: Mapped[str] = mapped_column(String(500), default="")
+    design_fingerprint: Mapped[str] = mapped_column(String(32), default="")
+    #: True while the player is on the Canvas page.
+    embedded: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    page: Mapped[Page] = relationship(back_populates="canvas_embed")
 
 
 # --------------------------------------------------------------------------- #

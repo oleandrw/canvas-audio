@@ -21,6 +21,8 @@ lyd på nytt bare fordi Canvas ble synkronisert.
 - [Environment variables](#environment-variables)
 - [Skaffe API-nøkler](#skaffe-api-nøkler)
 - [Starte lokalt](#starte-lokalt)
+- [Publiser i Canvas](#-publiser-i-canvas)
+- [Oppdatering](#️-oppdatering)
 - [Docker](#docker)
 - [Tester](#tester)
 - [Manuell integrasjonstest](#manuell-integrasjonstest)
@@ -159,7 +161,11 @@ Repoet er privat, så kloning krever at du er innlogget, for eksempel med
    (`.venv`), installerer appen og spør om du vil ha et ikon på skrivebordet.
    Første gang tar det noen minutter.
 2. Dobbeltklikk `start.bat` (eller ikonet). Appen åpner seg i nettleseren.
-3. Legg inn Canvas- og ElevenLabs-nøklene under ⚙️ Innstillinger.
+3. Legg inn Canvas- og ElevenLabs-nøklene under 🔑 API, og velg stemme og modell
+   under ⚙️ Innstillinger.
+
+Hent gjerne prosjektet med `git clone` framfor å laste ned en ZIP: da kan appen
+oppdatere seg selv fra [⬆️ Oppdatering](#️-oppdatering).
 
 `install.bat` kan kjøres på nytt når som helst, for eksempel etter en
 `git pull`. En `.venv` som finnes fra før gjenbrukes. Den kjører ingen
@@ -199,6 +205,42 @@ fylle ut filen på forhånd, kopier `.env.example` til `.env`.
 
 ---
 
+## 📤 Publiser i Canvas
+
+Menypunktet **Publiser i Canvas** legger lyden rett inn i emnet:
+
+1. Hver lydfil lastes opp til **Filer**, i en mappe per modul, for eksempel
+   `Lydfiler/01 Modul 1 – Introduksjon`. Mappenavnet velger du selv.
+2. Hver side får en avspiller **øverst**. Resten av siden blir ikke endret.
+
+Du velger utseende på avspilleren (Kort, Stripe, Kompakt, Minimal eller Mørk),
+farge, tekst og ikon, og ser resultatet i en forhåndsvisning med ekte lyd før du
+publiserer. Canvas tillater ikke egne stilark, så designene bruker bare inline CSS.
+
+Slik oppfører publiseringen seg:
+
+- Bare sider med oppdatert lyd publiseres.
+- En lydfil som allerede ligger i Canvas, lastes ikke opp igjen. Er den slettet
+  der, eller er lyden generert på nytt, lastes den opp på nytt.
+- Publiserer du igjen, byttes avspilleren ut i stedet for at det blir to. Sider som
+  allerede er oppdatert, blir ikke rørt.
+- Siden hentes fra Canvas rett før den endres, så endringer læreren har gjort
+  etter siste synkronisering blir med.
+- Canvas tar vare på forrige versjon av hver side (sidehistorikken), og ingen får
+  varsel om endringen.
+- **Fjern** tar avspilleren bort fra sidene. Lydfilene blir liggende i Filer.
+- Avspilleren er merket, så teksten i den aldri blir en del av det som leses opp,
+  og siden ikke blir markert som endret i Canvas.
+
+Canvas-tokenet sendes aldri til lagringstjenesten filene lastes opp til, bare til
+Canvas selv. Tokenet må tilhøre en lærer med rett til å endre sider og filer i emnet.
+
+API: `PUT /api/canvas-player/design`, `POST /api/canvas-player/preview`,
+`POST /api/canvas-player/runs` (`{"action": "publish" | "remove", "module_ids": [...]}`)
+og `GET /api/canvas-player/runs/current`.
+
+---
+
 ## Environment variables
 
 Oppslagsrekkefølgen for alle nøkler er **prosessmiljø → `.env` → standardverdi**.
@@ -217,7 +259,7 @@ lar seg omkonfigurere via nettleseren.
 | `SOUNDCLOUD_CLIENT_SECRET` | nei | Valgfri publisering |
 | `SOUNDCLOUD_REDIRECT_URI` | nei | Må matche det som er registrert hos SoundCloud |
 | `APP_PASSWORD` | nei | Settes den, kreves innlogging for hele applikasjonen |
-| `SECRET_KEY` | anbefalt | Signerer session-cookien og krypterer lagrede OAuth-tokens |
+| `SECRET_KEY` | nei (lages automatisk) | Signerer session-cookien og krypterer lagrede OAuth-tokens |
 | `HTTPS_ONLY` | nei | `1` bak HTTPS, slik at session-cookien får `Secure` |
 | `DATA_DIR` | nei | Hvor SQLite-filen ligger (standard `./data`) |
 | `OUTPUT_DIR` | nei | Hvor lydfilene havner (standard `./output`) |
@@ -226,16 +268,25 @@ lar seg omkonfigurere via nettleseren.
 | `LOG_LEVEL` | nei | `DEBUG`/`INFO`/`WARNING` (standard `INFO`) |
 | `HTTP_TIMEOUT` | nei | Sekunder, standard 60 |
 
-Generer en `SECRET_KEY`:
+Er `SECRET_KEY` ikke satt, lager appen en nøkkel første gang den starter og
+lagrer den i `.env`, slik at innlogging og SoundCloud-tilkoblingen overlever en
+omstart. Byttes nøkkelen senere, må du koble til SoundCloud på nytt. På en server
+bør du sette den selv som miljøvariabel:
 
 ```bash
 python -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
-Er den ikke satt, lages en tilfeldig nøkkel per prosess. Det er greit lokalt, men
-da overlever ikke innlogging og SoundCloud-tilkobling en omstart.
+Kan `.env` ikke skrives (for eksempel i en skrivebeskyttet container), brukes en
+tilfeldig nøkkel per prosess. Appen logger da en advarsel om at innlogging og
+SoundCloud-tilkobling ikke overlever en omstart.
 
-### Innstillinger-siden skriver `.env`
+### 🔑 API-siden skriver `.env`
+
+GUI-et har ett skille som er verdt å kjenne: **🔑 API skriver `.env`** (adresser,
+nøkler og app-passord), mens **⚙️ Innstillinger skriver databasen** (stemme,
+modell, budsjett, filnavnstil og deling). Stemmelista hentes med den *lagrede*
+ElevenLabs-nøkkelen, så legg inn nøkkelen først, og velg stemme etterpå.
 
 Lagrer du nøkler i GUI-et, skrives de til `.env` i prosjektmappa. Skrivingen er
 atomisk (temp-fil + `os.replace`) og filen får restriktive rettigheter der OS-et
@@ -246,6 +297,9 @@ endre dem og si fra om det.
 ---
 
 ## Skaffe API-nøkler
+
+Alle nøklene legges inn under **🔑 API** i menyen, med en «Test tilkoblingen»-knapp
+per leverandør.
 
 **Canvas** – logg inn → *Konto* → *Innstillinger* → *+ Ny tilgangsnøkkel*. Tokenet
 vises bare én gang. Applikasjonen trenger bare lesetilgang. Klarer ikke tokenet å
@@ -367,6 +421,47 @@ sudo chown -R 10001:10001 data output
 ```
 
 Docker Desktop på Windows og macOS håndhever ikke dette for bind mounts.
+
+---
+
+## ⬆️ Oppdatering
+
+Menypunktet **⬆️ Oppdatering** viser hvilken kode som kjører, og henter ny når du
+ber om det.
+
+Siden viser tre ting: programversjon og commit (både den som kjører og den som
+ligger i mappa), git-tilstanden, og databaseskjemaet. Er commit-en som kjører en
+annen enn den i mappa, sier siden at appen må startes på nytt.
+
+**«Se etter oppdatering»** kjører `git fetch` og forteller hva som er nytt.
+**«Oppdater nå»** gjør «fast forward» av `origin/<gren>`. Den stopper heller enn å
+overskrive noe:
+
+- Lokale endringer i sporede filer stopper oppdateringen, og filene listes opp.
+  Filer som ikke ligger i git (som databasens WAL-filer) påvirker ingenting.
+- Egne commits foran origin, løsrevet HEAD eller manglende oppstrømsgren stopper
+  den også, hver med sin egen forklaring.
+- Ingenting tvinges, og `git reset` brukes aldri. Lydfiler, `.env` og databasen
+  røres ikke.
+- Endres avhengighetene (`pyproject.toml` og venner), sier siden at du må kjøre
+  `install.bat` før du starter appen igjen.
+
+**Appen starter seg ikke selv på nytt.** Den kjører i et konsollvindu uten
+tjeneste eller vaktprosess, og `app/launcher.py` nekter å starte mens porten er
+opptatt. En automatisk omstart kunne derfor endt med at appen ble borte uten at du
+så hvorfor. Siden forteller i stedet hva du gjør: lukk vinduet, og dobbeltklikk på
+snarveien.
+
+**«Databaseskjema»** er ikke et migrasjonsnummer. Prosjektet har ingen nummererte
+migrasjoner: `add_missing_columns()` legger til nye kolonner ved oppstart. Derfor
+viser siden tre fakta i stedet for ett — versjonen koden forventer
+(`SCHEMA_VERSION` i `app/database.py`, satt for hånd), versjonen som står i selve
+databasefilen (`PRAGMA user_version`), og hvilke kolonner siste oppstart faktisk
+la til. De to siste er alltid sanne, uansett om noen glemmer å øke tallet.
+
+Kjører du i Docker, finnes det ingen `.git` i imaget. Siden sier da tydelig fra at
+den ikke kan oppdatere seg selv, og du henter ny versjon som et nytt image – se
+[GitHub og deployment](#github-og-deployment).
 
 ---
 
@@ -519,8 +614,11 @@ i september 2026:
 - **Opplasting**: `POST /tracks` som multipart med `track[title]`,
   `track[description]`, `track[sharing]` og `track[asset_data]`.
 - **Spillelister**: `POST /playlists` med et `playlist`-objekt som inneholder
-  `tracks` som `{"id": N}`; oppdatering med `PUT /playlists/{id}` der hele
-  sporlisten sendes på nytt.
+  `tracks` som `{"urn": "soundcloud:tracks:N"}`; oppdatering med
+  `PUT /playlists/{playlist_urn}` der hele sporlisten sendes på nytt. Numeriske
+  `id`-felt er utfaset fordi ID-ene ikke lenger får plass i 32 bit, og SoundCloud
+  avviser `{"id": N}` med «Could not parse JSON request body»
+  ([soundcloud/api#448](https://github.com/soundcloud/api/issues/448)).
 
 Praktiske begrensninger du må kjenne til:
 
@@ -535,6 +633,32 @@ Derfor er hele integrasjonen **valgfri**. Uten SoundCloud-credentials viser
 GUI-et en tydelig «ikke konfigurert»-tilstand, og Canvas → ElevenLabs fungerer
 helt uendret. En lydfil lastes aldri opp to ganger: track-ID og filhash lagres
 lokalt, og et uendret spor gjenbrukes. Ett spor kan ligge i flere spillelister.
+
+### Automatisk publisering og eksisterende spillelister
+
+På ☁️ SoundCloud-siden kan du slå på **«Publiser automatisk når en hel modul er
+ferdig generert»**. Når en genereringsjobb er ferdig og alle sidene med tekst i en
+modul har oppdatert lyd, lastes sporene opp og modulens spilleliste opprettes
+eller oppdateres. En modul som bare delvis er generert, publiseres ikke
+automatisk; bruk «Publiser nå» på modulen hvis du vil publisere den likevel.
+Publiseringen kan aldri stoppe eller feile selve lydgenereringen, og resultatet
+vises på SoundCloud-siden.
+
+Hver modul kan kobles til en spilleliste du allerede har på SoundCloud, i stedet
+for at appen lager en ny. Appen fjerner aldri spor fra en spilleliste: sporene
+som ligger der fra før beholdes, modulens spor settes inn i Canvas-rekkefølge, og
+et spor som er lastet opp på nytt fordi lyden er regenerert, byttes ut på samme
+plass. Den gamle versjonen av sporet blir liggende på SoundCloud-kontoen din.
+
+Før et spor gjenbrukes, sjekker appen at det fortsatt finnes på SoundCloud-kontoen.
+Har du slettet spor der, for eksempel sammen med en spilleliste, lastes de opp på
+nytt neste gang modulen publiseres. Bare et tydelig «finnes ikke» fra SoundCloud
+fører til ny opplasting, så en midlertidig feil gir aldri doble spor.
+
+API-dokumentasjonen sier ikke om `PUT /playlists/{playlist_urn}` erstatter eller legger til
+spor. Appen sender derfor alltid hele den sammenslåtte sporlisten, sjekker etterpå
+at spillelisten på SoundCloud stemmer, og endrer ikke en spilleliste hvis
+SoundCloud ikke oppgir alle sporene i den.
 
 ---
 
@@ -558,6 +682,11 @@ lokalt, og et uendret spor gjenbrukes. Ett spor kan ligge i flere spillelister.
 - **HTML saniteres** før lagring, og templates escaper alt. HTML kan aldri nå
   ElevenLabs: `ensure_plain_text()` kjøres rett før hvert betalte kall.
 - **CORS er av.** GUI og API deler origin, så det er ingenting å åpne opp.
+- **Oppdatering uten inndata.** `/api/update/*` tar ingen felter i det hele tatt:
+  gren og fjernlager leses fra repoet, git kjøres med argumentliste uten skall,
+  med tidsavbrudd og uten innloggingsdialoger, og bare «fast forward» er tillatt.
+  Endepunktene krever innlogging når `APP_PASSWORD` er satt. Står maskinen der
+  andre nettverk når den, bør du sette et passord.
 - **Valgfri app-auth.** Settes `APP_PASSWORD`, kreves innlogging for alt bortsett
   fra `/api/health` (så container-probes fungerer). Session-cookien er signert,
   `HttpOnly`, `SameSite=Lax`, og `Secure` når `HTTPS_ONLY=1`.
@@ -589,6 +718,9 @@ lokalt, og et uendret spor gjenbrukes. Ett spor kan ligge i flere spillelister.
 | POST | `/api/generation/{id}/cancel` | Avbryt |
 | POST | `/api/generation/{id}/retry-failed` | Kjør bare de feilede sidene |
 | POST | `/api/costs/estimate` | Kostnadsestimat |
+| GET | `/api/update/status` | Versjon, commit, git-tilstand og databaseskjema |
+| POST | `/api/update/check` | `git fetch` – ser etter ny kode |
+| POST | `/api/update/apply` | «Fast forward» av origin, stopper ved lokale endringer |
 | GET | `/api/costs/usage` | Faktisk forbruk |
 | GET | `/api/elevenlabs/voices` | Tilgjengelige stemmer |
 | GET | `/api/elevenlabs/models` | Tilgjengelige modeller |
@@ -667,5 +799,7 @@ automatisk tilbake i køen ved oppstart, og allerede ferdige sider hoppes over.
 | `app/services/prompts.py` | AI-instruksjonen (bump `PROMPT_VERSION` når du endrer den) |
 | `app/services/soundcloud_service.py` | Hele SoundCloud-integrasjonen, med API-fakta dokumentert |
 | `app/routes/ui.py` | Alle HTML-visningene og HTMX-fragmentene |
+| `app/static/js/settings.js` | Delt lagre-, test- og fjern-logikk for 🔑 API og ⚙️ Innstillinger |
+| `app/services/update_service.py` | All git-tilgang, ett sted, uten skall og uten inndata |
 | `app/static/css/app.css` | Designsystemet (tokens, komponenter, responsivt) |
 | `tests/test_pipeline.py` | Ende-til-ende-beviset for hele kjeden uten betalte kall |

@@ -52,6 +52,83 @@ class TestSettings:
         reset_store(env_path=env / ".env")
         assert len(get_settings().secret_key) > 20
 
+    def test_saving_a_key_keeps_writing_to_the_same_file(self, env: Path, monkeypatch) -> None:
+        """A save must not move the store back to the default .env behind our back."""
+        from fastapi.testclient import TestClient
+
+        from app.config import get_store, reset_store
+        from app.main import create_app
+
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        reset_store(env_path=env / ".env")
+        with TestClient(create_app()) as client:
+            client.post("/api/settings", json={"openai_api_key": "sk-testverdi"})
+
+        assert get_store().env_path == env / ".env"
+        assert "sk-testverdi" in (env / ".env").read_text(encoding="utf-8")
+
+    def test_a_missing_secret_key_is_generated_once_and_saved(self, env: Path, monkeypatch) -> None:
+        from app.config import ensure_secret_key, parse_env_file, reset_store
+
+        monkeypatch.delenv("SECRET_KEY", raising=False)
+        assert ensure_secret_key(reset_store(env_path=env / ".env")) == "generated"
+        key = get_settings().secret_key
+        assert parse_env_file(env / ".env")["SECRET_KEY"] == key
+
+        restarted = reset_store(env_path=env / ".env")  # a new process reads .env again
+        assert ensure_secret_key(restarted) == "file"
+        assert get_settings().secret_key == key
+
+    def test_a_secret_key_from_the_environment_is_never_written(self, env: Path) -> None:
+        from app.config import ensure_secret_key
+
+        assert ensure_secret_key() == "env"
+        assert not (env / ".env").exists()
+
+    def test_an_unwritable_env_file_falls_back_to_a_per_process_key(
+        self, env: Path, monkeypatch
+    ) -> None:
+        from app.config import ConfigStore, ensure_secret_key, reset_store
+
+        def _read_only(*_args, **_kwargs) -> None:
+            raise PermissionError("read-only")
+
+        monkeypatch.delenv("SECRET_KEY", raising=False)
+        monkeypatch.setattr(ConfigStore, "_atomic_write", _read_only)
+        assert ensure_secret_key(reset_store(env_path=env / ".env")) == "ephemeral"
+        assert len(get_settings().secret_key) > 20
+
+    def test_starting_the_app_saves_a_generated_key(self, env: Path, monkeypatch) -> None:
+        from app.config import parse_env_file, reset_store
+
+        monkeypatch.delenv("SECRET_KEY", raising=False)
+        reset_store(env_path=env / ".env")
+        from app.main import create_app
+
+        create_app()
+        assert parse_env_file(env / ".env").get("SECRET_KEY")
+
+    def test_the_soundcloud_connection_survives_a_restart(
+        self, db: Session, env: Path, monkeypatch
+    ) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        from app import config
+        from app.services import soundcloud_service as sc
+
+        monkeypatch.delenv("SECRET_KEY", raising=False)
+        config.ensure_secret_key(config.reset_store(env_path=env / ".env"))
+        expires = datetime.now(UTC) + timedelta(hours=1)
+        sc.save_token(db, sc.TokenBundle("access", "refresh", expires))
+        db.commit()
+
+        # A restart: a fresh process has no per-process key and reads .env again.
+        monkeypatch.setattr(config, "_EPHEMERAL_SECRET", None)
+        config.reset_store(env_path=env / ".env")
+        restored = sc.load_token(db)
+        assert restored is not None
+        assert restored.access_token == "access"
+
 
 class TestPreferences:
     def test_defaults_are_used_when_nothing_is_stored(self, db: Session) -> None:

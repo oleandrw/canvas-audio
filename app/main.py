@@ -6,6 +6,7 @@ single background worker that runs generation jobs.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -16,13 +17,14 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from app import __version__
-from app.config import PROJECT_ROOT, get_settings
-from app.database import init_db
+from app.config import PROJECT_ROOT, ensure_secret_key, get_settings, get_store
+from app.database import init_db, session_scope
 from app.jobs.queue import get_queue
 from app.logging_config import configure_logging, get_logger
 from app.routes import (
     audio,
     canvas,
+    canvas_player,
     costs,
     elevenlabs,
     generation,
@@ -30,10 +32,12 @@ from app.routes import (
     pages,
     soundcloud,
     ui,
+    update,
 )
 from app.routes import (
     settings as settings_routes,
 )
+from app.services import app_settings, update_service
 from app.services.errors import (
     AuthenticationError,
     ConfigurationError,
@@ -66,7 +70,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     settings.output_dir.mkdir(parents=True, exist_ok=True)
-    init_db()
+    schema = init_db()
+    with session_scope() as session:
+        app_settings.record_schema_state(session, schema.version, schema.added_columns)
 
     logger.info("Canvas til lyd %s starting", __version__)
     logger.info("Database: %s", settings.database_url.split("///")[-1])
@@ -79,8 +85,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         bool(settings.anthropic_api_key),
         bool(settings.soundcloud_client_id and settings.soundcloud_client_secret),
     )
+    if schema.added_columns:
+        logger.info("Database schema updated: %s", ", ".join(schema.added_columns))
     if not settings.auth_enabled:
         logger.info("APP_PASSWORD is not set - the GUI is open to anyone who can reach it.")
+
+    # Remember which commit this process started from; the update page compares it
+    # with the folder to see whether a restart is pending. Never fatal.
+    with contextlib.suppress(Exception):
+        await update_service.boot_commit()
 
     queue = get_queue()
     await queue.start()
@@ -92,8 +105,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def create_app() -> FastAPI:
+    secret_source = ensure_secret_key()
     settings = get_settings()
     configure_logging(settings.log_level)
+    if secret_source == "generated":
+        logger.info(
+            "SECRET_KEY was not set: generated one and saved it to %s", get_store().env_path
+        )
+    elif secret_source == "ephemeral":
+        logger.warning(
+            "SECRET_KEY is not set and .env could not be written. Logins and the SoundCloud "
+            "connection will not survive a restart; set SECRET_KEY in the environment."
+        )
 
     app = FastAPI(
         title="Canvas → Lyd",
@@ -131,6 +154,10 @@ def create_app() -> FastAPI:
     app.include_router(costs.router)
     app.include_router(audio.router)
     app.include_router(soundcloud.router)
+    app.include_router(canvas_player.router)
+    app.include_router(canvas_player.page_router)
+    app.include_router(update.router)
+    app.include_router(update.page_router)
     app.include_router(settings_routes.router)
     app.include_router(ui.router)
 

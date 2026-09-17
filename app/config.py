@@ -112,11 +112,16 @@ class Settings:
         return bool(self.app_password)
 
 
+#: Where `.env` lives unless a caller says otherwise. Tests point this somewhere
+#: harmless, so a stray `reset_store()` can never reach the real file.
+DEFAULT_ENV_PATH = PROJECT_ROOT / ".env"
+
+
 class ConfigStore:
     """Owns the `.env` file and answers "where did this value come from?"."""
 
     def __init__(self, env_path: Path | None = None) -> None:
-        self.env_path = env_path or (PROJECT_ROOT / ".env")
+        self.env_path = env_path or DEFAULT_ENV_PATH
         self._file_values: dict[str, str] = {}
         self.reload()
 
@@ -244,15 +249,38 @@ _EPHEMERAL_SECRET: str | None = None
 
 
 def _ephemeral_secret_key() -> str:
-    """Session-signing key used when SECRET_KEY is unset.
+    """Fallback key for when SECRET_KEY is unset and could not be saved.
 
-    Regenerated per process, so sessions do not survive a restart. That is fine for
-    local use and it means we never invent a key and silently persist it.
+    Regenerated per process, so sessions and the stored SoundCloud token do not
+    survive a restart. :func:`ensure_secret_key` avoids this in normal use.
     """
     global _EPHEMERAL_SECRET
     if _EPHEMERAL_SECRET is None:
         _EPHEMERAL_SECRET = secrets.token_urlsafe(48)
     return _EPHEMERAL_SECRET
+
+
+def ensure_secret_key(store: ConfigStore | None = None) -> str:
+    """Give SECRET_KEY a value that survives restarts.
+
+    The key signs the session cookie and encrypts the stored SoundCloud token. A key
+    that changes on every start makes that token unreadable, which silently
+    disconnects SoundCloud and with it automatic publishing. When neither the
+    environment nor `.env` sets a key, one is generated once and written to `.env`,
+    which is gitignored like every other secret there.
+
+    Returns where the key comes from: ``"env"``, ``"file"``, ``"generated"``, or
+    ``"ephemeral"`` when `.env` could not be written.
+    """
+    store = store or get_store()
+    source = store.source("SECRET_KEY")
+    if source != "default":
+        return source
+    try:
+        store.update({"SECRET_KEY": secrets.token_urlsafe(48)})
+    except OSError:
+        return "ephemeral"
+    return "generated"
 
 
 _store: ConfigStore | None = None

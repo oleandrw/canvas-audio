@@ -11,6 +11,7 @@ Two guarantees this file enforces for the whole suite:
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,12 +22,14 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from app import config
 from app.config import reset_store
 from app.database import get_session_factory, init_db, reset_engine, session_scope
 from app.jobs import queue as queue_module
 from app.models.core import Course, GeneratedAudio, Module, Page
 from app.pricing import reset_pricing_cache
 from app.services import http as http_module
+from app.services import update_service
 from app.services.hashing import text_hash
 from app.services.naming import course_dirname, module_dirname
 
@@ -67,6 +70,21 @@ def _no_network(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_real_git(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same promise as _no_network: the suite never runs git against a real checkout.
+
+    The block sits on ``subprocess.run`` rather than on ``_run_git``, so a test may
+    still fake either level.
+    """
+
+    def _blocked(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("Git is disabled in tests. Fake update_service._run_git.")
+
+    monkeypatch.setattr(subprocess, "run", _blocked)
+    update_service.reset_state()
+
+
+@pytest.fixture(autouse=True)
 def _fast_retries(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep the retry/backoff logic under test without the real waiting."""
     monkeypatch.setattr(http_module, "DEFAULT_BASE_DELAY", 0.001)
@@ -80,6 +98,9 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     output_dir = tmp_path / "output"
     data_dir.mkdir()
     output_dir.mkdir()
+
+    # A stray reset_store() must never reach the developer's own .env file.
+    monkeypatch.setattr(config, "DEFAULT_ENV_PATH", tmp_path / ".env")
 
     for key, value in DUMMY_ENV.items():
         monkeypatch.setenv(key, value)
