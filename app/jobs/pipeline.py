@@ -31,8 +31,10 @@ from app.models.core import (
 from app.pricing import load_pricing
 from app.services import (
     anthropic_service,
+    canvas_publish,
     elevenlabs_service,
     openai_service,
+    pronunciation,
     soundcloud_publish,
 )
 from app.services.app_settings import load_preferences
@@ -361,7 +363,14 @@ async def process_item(
                 lambda session: set_item_status(session, item_id, ItemStatus.AI_PROCESSING)
             )
             result = await _run_ai(work, config)
-            text_for_tts = ensure_sentence_endings(result.text)
+            # The AI rewrites the text, so it can put an abbreviation back in.
+            # The list is applied to its output too, and the same string is both
+            # stored and spoken — the stored text is never a different text.
+            text_for_tts = await run_db(
+                lambda session: pronunciation.clean_text(
+                    session, ensure_sentence_endings(result.text)
+                )
+            )
             await run_db(
                 lambda session: store_ai_result(
                     session,
@@ -380,11 +389,22 @@ async def process_item(
         clean_text = ensure_plain_text(text_for_tts, context="teksten som skal leses opp")
 
         await run_db(lambda session: set_item_status(session, item_id, ItemStatus.GENERATING_AUDIO))
+
+        async def report(part: int, parts: int) -> None:
+            """A page too long for one request is read in several takes; show which."""
+            if parts > 1:
+                await run_db(
+                    lambda session: set_item_status(
+                        session, item_id, ItemStatus.GENERATING_AUDIO, f"Del {part} av {parts}"
+                    )
+                )
+
         synthesis = await tts_client.synthesize(
             clean_text,
             voice_id=config.voice_id,
             model_id=config.tts_model,
             voice_settings=config.voice_settings or None,
+            progress=report,
         )
         stored = write_audio(work.relative_path, synthesis.audio)
 
@@ -402,7 +422,9 @@ async def process_item(
                 job_id=config.job_id,
             )
         )
-        await run_db(lambda session: complete_item(session, item_id, ItemStatus.DONE))
+        parts = getattr(synthesis, "parts", 1)
+        message = f"Lest inn i {parts} deler." if parts > 1 else ""
+        await run_db(lambda session: complete_item(session, item_id, ItemStatus.DONE, message))
         return ItemStatus.DONE
 
     except ServiceError as exc:
@@ -463,8 +485,9 @@ async def run_job(
         await run_db(lambda session: finish_job(session, job_id, cancelled=cancelled))
         logger.info("Generation job finished id=%s cancelled=%s", job_id, cancelled)
         if not cancelled:
-            # Best-effort follow-up: this never raises into the job.
+            # Best-effort follow-up: neither of these ever raises into the job.
             await soundcloud_publish.publish_after_job(job_id)
+            await canvas_publish.publish_after_job(job_id)
 
 
 def _fail_job(session: Session, job_id: int, message: str) -> None:

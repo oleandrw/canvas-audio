@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -11,6 +13,7 @@ from app.logging_config import get_logger
 from app.models.core import Course
 from app.schemas.canvas import CourseOption, CourseOut, SyncRequest, SyncResponse
 from app.security import require_auth
+from app.services import sync_progress
 from app.services.canvas_service import CanvasClient
 from app.services.presenters import course_out, selected_course
 from app.services.sync_service import sync_course
@@ -48,14 +51,27 @@ def get_selected_course(session: Session = Depends(get_session)) -> CourseOut | 
     return course_out(session, course) if course else None
 
 
+@router.get("/sync/status")
+def sync_status() -> dict[str, Any]:
+    """How far the running synchronisation has come, for the GUI to poll."""
+    return sync_progress.snapshot()
+
+
 @router.post("/sync", response_model=SyncResponse)
 async def sync(payload: SyncRequest) -> SyncResponse:
     settings = get_settings()
-    result = await sync_course(
-        base_url=settings.canvas_url,
-        token=settings.canvas_token,
-        canvas_course_id=payload.course_id,
-    )
+    sync_progress.start()
+    try:
+        result = await sync_course(
+            base_url=settings.canvas_url,
+            token=settings.canvas_token,
+            canvas_course_id=payload.course_id,
+            progress=sync_progress.update,
+        )
+    except Exception:
+        sync_progress.finish("Synkroniseringen feilet.")
+        raise
+    sync_progress.finish(result.as_message())
     return SyncResponse(
         course_id=result.course_id,
         course_name=result.course_name,

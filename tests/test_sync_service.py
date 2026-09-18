@@ -300,3 +300,67 @@ class TestRecleanOnSync:
             page = session.scalar(select(Page).where(Page.title == "Velkommen"))
             assert page.original_text == html_to_text(page.html)
             assert page.original_hash == text_hash(page.original_text)
+
+
+class TestProgress:
+    """A long synchronisation says how far it has come."""
+
+    async def test_it_counts_the_pages_as_they_arrive(self, env: Path) -> None:
+        from app.services import sync_progress
+
+        seen: list[dict[str, Any]] = []
+
+        def record(**kwargs: Any) -> None:
+            seen.append(dict(kwargs))
+
+        await sync_course(
+            base_url="https://canvas.example.test",
+            token="12345~token",
+            canvas_course_id="4711",
+            transport=canvas_transport(),
+            progress=record,
+        )
+
+        phases = [call["phase"] for call in seen if "phase" in call]
+        assert "Henter sideinnhold" in phases
+        assert "Rydder teksten" in phases
+        done = [call["done"] for call in seen if "done" in call]
+        assert done[0] == 0
+        assert max(done) == 4, "every page is counted"
+        assert done == sorted(done), "the count never goes backwards"
+        sync_progress.reset()
+
+    async def test_the_status_endpoint_reports_the_run(self, client: Any) -> None:
+        from app.services import sync_progress
+
+        sync_progress.reset()
+        assert client.get("/api/canvas/sync/status").json()["running"] is False
+
+        sync_progress.start("Mitt emne")
+        sync_progress.update(phase="Henter sideinnhold", done=30, total=120)
+        body = client.get("/api/canvas/sync/status").json()
+
+        assert body == {
+            "running": True,
+            "course_name": "Mitt emne",
+            "phase": "Henter sideinnhold",
+            "done": 30,
+            "total": 120,
+            "message": "",
+            "started_at": body["started_at"],
+            "percent": 25,
+        }
+
+        sync_progress.finish("ferdig")
+        assert client.get("/api/canvas/sync/status").json()["running"] is False
+        sync_progress.reset()
+
+    async def test_progress_from_a_finished_run_is_ignored(self) -> None:
+        from app.services import sync_progress
+
+        sync_progress.start("Mitt emne")
+        sync_progress.finish("ferdig")
+        sync_progress.update(done=99, total=99)
+
+        assert sync_progress.snapshot()["done"] == 0
+        sync_progress.reset()

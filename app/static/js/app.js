@@ -19,15 +19,28 @@
     const el = document.createElement("div");
     el.className = "toast " + (kind || "");
     el.innerHTML =
-      '<span class="alert-icon">' +
+      '<span class="alert-icon" aria-hidden="true">' +
       (kind === "error" ? "⚠️" : kind === "ok" ? "✅" : "ℹ️") +
-      "</span><div></div>";
-    el.lastChild.textContent = message;
-    toastStack().appendChild(el);
-    setTimeout(function () {
+      '</span><div></div>' +
+      '<button type="button" class="toast-close" aria-label="Lukk melding">✕</button>';
+    el.children[1].textContent = message;
+    // An error is read out at once and interrupts; the rest wait their turn.
+    if (kind === "error") el.setAttribute("role", "alert");
+
+    function dismiss() {
       el.style.opacity = "0";
       setTimeout(function () { el.remove(); }, 250);
-    }, kind === "error" ? 8000 : 4500);
+    }
+    el.querySelector(".toast-close").addEventListener("click", dismiss);
+    toastStack().appendChild(el);
+
+    // An error stays until it is dismissed: it is the one message that must not
+    // disappear before it has been read.
+    if (kind === "error") return;
+    let timer = setTimeout(dismiss, 4500);
+    el.addEventListener("mouseenter", function () { clearTimeout(timer); });
+    el.addEventListener("focusin", function () { clearTimeout(timer); });
+    el.addEventListener("mouseleave", function () { timer = setTimeout(dismiss, 2500); });
   }
 
   window.toast = toast;
@@ -101,17 +114,47 @@
         '<button class="btn btn-ghost" data-act="cancel">Avbryt</button>' +
         '<button class="btn btn-primary" data-act="ok"></button>' +
         "</div></div>";
-      backdrop.querySelector("h2").textContent = title;
-      backdrop.querySelector("p").textContent = message;
+      const heading = backdrop.querySelector("h2");
+      const text = backdrop.querySelector("p");
+      const id = "modal-" + Date.now();
+      heading.id = id + "-title";
+      text.id = id + "-text";
+      backdrop.querySelector(".modal").setAttribute("aria-labelledby", heading.id);
+      backdrop.querySelector(".modal").setAttribute("aria-describedby", text.id);
+      heading.textContent = title;
+      text.textContent = message;
       backdrop.querySelector('[data-act="ok"]').textContent = confirmLabel || "Fortsett";
+
+      const opener = document.activeElement;
+      const outside = [document.querySelector("header.topbar"), document.getElementById("main")];
+      outside.forEach(function (el) { if (el) el.inert = true; });
 
       function close(value) {
         backdrop.remove();
         document.removeEventListener("keydown", onKey);
+        outside.forEach(function (el) { if (el) el.inert = false; });
+        restoreFocus(opener);
         resolve(value);
+      }
+      function restoreFocus(element) {
+        if (element && typeof element.focus === "function") element.focus();
+      }
+      function trapFocus(event) {
+        const stops = backdrop.querySelectorAll("button:not([disabled])");
+        if (!stops.length) return;
+        const first = stops[0];
+        const last = stops[stops.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
       }
       function onKey(event) {
         if (event.key === "Escape") close(false);
+        else if (event.key === "Tab") trapFocus(event);
       }
 
       backdrop.addEventListener("click", function (event) {
@@ -127,12 +170,4 @@
 
   window.confirmDialog = confirmDialog;
 
-  // ------------------------------------------------------- collapsible tree
-
-  document.addEventListener("click", function (event) {
-    const head = event.target.closest(".module-head");
-    if (!head) return;
-    if (event.target.matches("input, label, a, button")) return;
-    head.parentElement.classList.toggle("collapsed");
-  });
 })();

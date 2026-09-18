@@ -80,12 +80,41 @@ Hver side har en avledet status, beregnet fra Canvas-tidsstempel og to hasher
 | --- | --- |
 | ✓ Oppdatert | Lyden er laget av nøyaktig dagens tekst |
 | ○ Ikke generert | Det finnes ingen lydfil |
-| ⚠ Canvas-siden er endret | Innholdet i Canvas er endret etter at lyden ble laget |
+| ⚠ Teksten fra Canvas er endret | Innholdet i Canvas er endret etter at lyden ble laget — eller appen utleder nå en annen tekst fra samme side (ny uttaleliste, forbedret rensing) |
 | ⚠ Teksten er endret | Den bearbeidede/redigerte teksten er endret |
 | ✕ Feilet | Forrige forsøk feilet – meldingen vises på siden |
 
 Utvalgsknapper: **Generer manglende**, **Generer endrede**, **Regenerer valgte**,
 **Regenerer alt**. Synkronisering fra Canvas trigger aldri regenerering.
+
+Med 1000+ sider i databasen henter `/canvas` bare modulene; sidene i en modul
+hentes når du åpner den. Søkefeltet og statusfilteret kjøres på serveren, så de
+finner også sider i moduler du ikke har åpnet, og «Velg alle / manglende /
+endrede» sender et *modus* til serveren i stedet for tusen avkryssinger.
+
+### Uttaleliste
+
+Talemotoren bommer på forkortelser og egennavn. I **⚙️ Innstillinger → 🗣️ Uttale**
+skriver du en liste med «skrevet i Canvas → leses som»: «HiØ» → «Høgskolen i
+Østfold», «jf.» → «jamfør», «§» → «paragraf». Oppslagene er ren tekst, ikke
+regulære uttrykk, og du velger per oppslag om det skal gjelde hele ord og om
+store/små bokstaver skal ha noe å si. Det lengste oppslaget vinner, og en
+erstattet tekst blir aldri erstattet en gang til.
+
+Listen brukes **når teksten renses**, ikke som et skjult ekstra steg rett før
+tale. Det betyr at teksten du ser på sidevisningen er nøyaktig den teksten som
+blir lest opp og som hashes for endringsdeteksjon. Når du lagrer listen, renses
+de lagrede sidene på nytt med én gang — uten å kontakte Canvas — og bare sidene
+som faktisk endres blir merket som endret.
+
+### Lange sider
+
+ElevenLabs har en grense per forespørsel (40 000 tegn for turbo og flash v2.5,
+10 000 for multilingual v2, noen tusen for v3). Sider som er lengre deles
+automatisk på setningsgrenser og settes sammen til én lydfil. Hver del sender
+nabo-teksten som kontekst (`previous_text`/`next_text`), så tonefallet ikke
+hopper i skjøtene. Prisen er den samme — den beregnes per tegn, ikke per
+forespørsel. Underveis står det «Del 3 av 5» på siden i generering-tabellen.
 
 ---
 
@@ -483,6 +512,20 @@ Canvas-paginering og feilkoder, ElevenLabs-feil og HTML-vakten, SoundCloud PKCE
 og token-rotasjon, alle API-rutene, GUI-rendring, samt en ende-til-ende-kjøring
 av hele pipelinen med injiserte fake-klienter.
 
+### Manuell tilgjengelighetstest
+
+`tests/test_accessibility.py` regner ut kontrastforholdene fra `app.css` og leser
+den ferdige HTML-en, men noen ting må prøves med tastatur og skjermleser:
+
+- Trykk Tab øverst på `/canvas`: første stopp skal være «Hopp til hovedinnhold».
+- Tab videre til en modul: Enter og mellomrom skal åpne den, og pilen skal snu.
+- Åpne kostnadsdialogen: Tab skal bli værende inne i dialogen, Escape skal lukke
+  den, og fokus skal tilbake til knappen du kom fra.
+- Slå på «reduser bevegelse» i Windows: varsler skal slutte å gli inn, men
+  fremdriftssnurren skal fortsatt snurre.
+- Med skjermleser: et varsel skal leses opp, og menylenkene skal ha navn også når
+  vinduet er smalere enn 520 px og bare emojiene vises.
+
 ---
 
 ## Manuell integrasjonstest
@@ -702,6 +745,7 @@ SoundCloud ikke oppgir alle sporene i den.
 | GET | `/api/canvas/courses/{id}` | Lokalt lagret emnestruktur |
 | GET | `/api/canvas/selected` | Valgt emne |
 | POST | `/api/canvas/sync` | Synkroniser et emne |
+| GET | `/api/canvas/sync/status` | Fremdrift for synkroniseringen som kjører |
 | GET | `/api/pages` | Sider i valgt emne |
 | GET | `/api/pages/{id}` | Sidedetaljer |
 | PUT | `/api/pages/{id}/text` | Lagre redigert tekst |
@@ -725,6 +769,7 @@ SoundCloud ikke oppgir alle sporene i den.
 | GET | `/api/elevenlabs/voices` | Tilgjengelige stemmer |
 | GET | `/api/elevenlabs/models` | Tilgjengelige modeller |
 | POST | `/api/elevenlabs/test` | Test nøkkelen |
+| GET | `/api/elevenlabs/voices/{id}/preview` | Lydprøve av en stemme (hentes av appen, ikke nettleseren) |
 | GET | `/api/audio/{page_id}` | Strøm lydfilen (`?download=1` for nedlasting) |
 | GET | `/api/soundcloud/status` | Tilkoblingsstatus |
 | POST | `/api/soundcloud/connect` | Start OAuth |
@@ -732,6 +777,9 @@ SoundCloud ikke oppgir alle sporene i den.
 | POST | `/api/soundcloud/disconnect` | Koble fra |
 | POST | `/api/soundcloud/upload` | Last opp lydfiler |
 | POST | `/api/soundcloud/sync-playlists` | Én spilleliste per modul |
+| GET | `/api/uttale` | Uttalelisten |
+| PUT | `/api/uttale` | Lagre listen og rense de lagrede sidene på nytt |
+| POST | `/api/uttale/prov` | Vis hvordan en tekst blir lest |
 | GET | `/api/settings/status` | Maskert nøkkelstatus |
 | POST | `/api/settings` | Lagre innstillinger |
 | POST | `/api/settings/test/{provider}` | Test én leverandør |

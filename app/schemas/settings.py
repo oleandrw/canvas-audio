@@ -62,6 +62,7 @@ class SettingsUpdate(BaseModel):
     filename_style: str | None = None
     soundcloud_sharing: str | None = None
     soundcloud_auto_publish: bool | None = None
+    canvas_auto_publish: bool | None = None
 
     @field_validator("ai_provider")
     @classmethod

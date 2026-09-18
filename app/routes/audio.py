@@ -16,6 +16,10 @@ from app.security import UnsafePathError, require_auth
 from app.services.audio_service import resolve_path
 from app.services.naming import slugify
 
+#: MP3 is already compressed, and gzip would break the byte ranges the
+#: browser's audio element asks for. This tells the compressor to keep off.
+IDENTITY = {"Content-Encoding": "identity"}
+
 router = APIRouter(prefix="/api/audio", tags=["audio"], dependencies=[Depends(require_auth)])
 
 
@@ -44,6 +48,6 @@ def get_audio(
         # Starlette handles the RFC 5987 encoding; keep the name ASCII anyway so
         # the plain `filename=` fallback is also correct in older browsers.
         nice_name = slugify(page.title, fallback="lydfil") + ".mp3"
-        return FileResponse(path, media_type="audio/mpeg", filename=nice_name)
+        return FileResponse(path, media_type="audio/mpeg", filename=nice_name, headers=IDENTITY)
 
-    return FileResponse(path, media_type="audio/mpeg")
+    return FileResponse(path, media_type="audio/mpeg", headers=IDENTITY)

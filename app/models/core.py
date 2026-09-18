@@ -380,6 +380,26 @@ class CanvasEmbed(Base):
     page: Mapped[Page] = relationship(back_populates="canvas_embed")
 
 
+class PronunciationRule(Base):
+    """One «from → to» the user wants applied before a page is read aloud."""
+
+    __tablename__ = "pronunciation_rules"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    pattern: Mapped[str] = mapped_column(String(200))
+    replacement: Mapped[str] = mapped_column(String(400), default="")
+    #: Off by default: «hiø» and «HiØ» are the same word to a reader.
+    match_case: Mapped[bool] = mapped_column(Boolean, default=False)
+    #: On by default, so «jf.» does not also match inside a longer word.
+    whole_word: Mapped[bool] = mapped_column(Boolean, default=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    note: Mapped[str] = mapped_column(String(200), default="")
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Preferences and OAuth
 # --------------------------------------------------------------------------- #

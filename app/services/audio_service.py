@@ -97,6 +97,44 @@ def mp3_duration(path: Path) -> float:
         return 0.0
 
 
+def _strip_id3v2(data: bytes) -> bytes:
+    """Remove a leading ID3v2 tag, if there is one."""
+    if len(data) < 10 or not data.startswith(b"ID3"):
+        return data
+    size = 0
+    for byte in data[6:10]:
+        if byte & 0x80:  # not a syncsafe integer, so not a tag we understand
+            return data
+        size = (size << 7) | byte
+    end = 10 + size + (10 if data[5] & 0x10 else 0)  # flag 0x10: a footer follows
+    return data[end:] if end <= len(data) else data
+
+
+def _strip_id3v1(data: bytes) -> bytes:
+    """Remove a trailing ID3v1 tag, if there is one."""
+    if len(data) > 128 and data[-128:-125] == b"TAG":
+        return data[:-128]
+    return data
+
+
+def join_mp3(parts: list[bytes]) -> bytes:
+    """Join parts recorded with the same voice, model and format into one file.
+
+    The frames fit together as they are — that is what makes a fixed bit rate
+    fixed. The metadata does not: an ID3 tag in the middle of the stream is not
+    audio, and players that trust it report the wrong length. So the first part
+    keeps its header, the last keeps its trailer, and the rest give theirs up.
+    """
+    if len(parts) == 1:
+        return parts[0]
+    last = len(parts) - 1
+    cleaned = []
+    for index, part in enumerate(parts):
+        audio = part if index == 0 else _strip_id3v2(part)
+        cleaned.append(audio if index == last else _strip_id3v1(audio))
+    return b"".join(cleaned)
+
+
 def write_audio(relative_path: str, data: bytes) -> StoredAudio:
     """Write MP3 bytes to disk and return everything the database needs."""
     absolute = resolve_path(relative_path)

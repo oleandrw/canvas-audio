@@ -313,6 +313,77 @@ def html_to_text(html: str) -> str:
     return text.strip()
 
 
+_SENTENCE_END = re.compile(r"(?<=[.!?…])\s+")
+
+
+def _hard_split(text: str, budget: int) -> list[str]:
+    """Last resort: cut inside one very long sentence, on spaces."""
+    pieces: list[str] = []
+    current = ""
+    for word in text.split(" "):
+        candidate = f"{current} {word}" if current else word
+        if current and len(candidate) > budget:
+            pieces.append(current)
+            current = word
+        else:
+            current = candidate
+        while len(current) > budget:  # a single word longer than the whole budget
+            pieces.append(current[:budget])
+            current = current[budget:]
+    if current:
+        pieces.append(current)
+    return pieces
+
+
+def _units(text: str, budget: int) -> list[tuple[str, str]]:
+    """``(separator, piece)`` pairs, each piece at most ``budget`` characters."""
+    units: list[tuple[str, str]] = []
+    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+    for index, paragraph in enumerate(paragraphs):
+        separator = "\n\n" if index else ""
+        if len(paragraph) <= budget:
+            units.append((separator, paragraph))
+            continue
+        for number, sentence in enumerate(s for s in _SENTENCE_END.split(paragraph) if s):
+            inner = separator if number == 0 else " "
+            if len(sentence) <= budget:
+                units.append((inner, sentence))
+                continue
+            for piece_number, piece in enumerate(_hard_split(sentence, budget)):
+                units.append((inner if piece_number == 0 else " ", piece))
+    return units
+
+
+def split_for_tts(text: str, budget: int) -> list[str]:
+    """Split text into pieces no longer than ``budget`` characters.
+
+    Text-to-speech bills per character but accepts only so many of them per
+    request, so a long page has to be read in several takes. The cuts follow the
+    structure the cleaner already produced — paragraphs first, then sentences —
+    and only inside a single enormous sentence does it fall back to cutting on a
+    space. A sentence is never cut in two while there is any other option, because
+    that is where a listener would hear the seam.
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    if budget <= 0 or len(text) <= budget:
+        return [text]
+
+    chunks: list[str] = []
+    current = ""
+    for separator, piece in _units(text, budget):
+        joiner = separator if current else ""
+        if current and len(current) + len(joiner) + len(piece) > budget:
+            chunks.append(current)
+            current = piece
+        else:
+            current = f"{current}{joiner}{piece}"
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def contains_html(text: str) -> bool:
     return bool(_HTML_TAG.search(text or ""))
 

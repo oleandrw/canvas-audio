@@ -15,8 +15,17 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import session_scope
-from app.models.core import CanvasEmbed, Page
+from app.models.core import (
+    AIProvider,
+    CanvasEmbed,
+    GenerationJob,
+    ItemStatus,
+    JobItem,
+    JobStatus,
+    Page,
+)
 from app.services import canvas_publish as publish
+from app.services.app_settings import set_value
 from app.services.canvas_player import PlayerDesign, find_player_blocks, has_player
 from app.services.errors import ConfigurationError
 from app.services.hashing import audio_is_current
@@ -330,6 +339,26 @@ class TestRoutes:
         assert "Modul 1 – Introduksjon" in response.text
         assert 'data-canvas-audio="1"' in response.text
 
+    def test_the_auto_publish_setting_is_saved_and_shown(
+        self, client: TestClient, seeded: dict[str, Any]
+    ) -> None:
+        assert client.post("/api/settings", json={"canvas_auto_publish": True}).status_code == 200
+        preferences = client.get("/api/settings/status").json()["preferences"]
+        assert preferences["canvas_auto_publish"] == "True"
+        assert 'id="canvas_auto_publish" checked' in client.get("/publiser-canvas").text
+
+    def test_the_page_shows_the_last_automatic_publish(
+        self, client: TestClient, seeded: dict[str, Any]
+    ) -> None:
+        with session_scope() as session:
+            publish.record_last_publish(
+                session, job_id=7, ok=False, message="1 publisert, 2 feilet.", modules=["Modul 1"]
+            )
+
+        page = client.get("/publiser-canvas").text
+        assert "1 publisert, 2 feilet." in page
+        assert "Modul 1" in page
+
     def test_saving_a_design(self, client: TestClient) -> None:
         response = client.put(
             "/api/canvas-player/design",
@@ -388,3 +417,165 @@ class TestRoutes:
         response = client.post("/api/canvas-player/runs", json={"action": "remove"})
         assert response.status_code == 400
         assert "avspiller" in response.json()["detail"]
+
+
+def build_job(session: Session, page_ids: list[int], *, course_id: int) -> int:
+    job = GenerationJob(
+        course_id=course_id,
+        status=JobStatus.COMPLETED,
+        ai_provider=AIProvider.NONE,
+        voice_id="v1",
+        voice_name="Testrøst",
+        tts_model="eleven_multilingual_v2",
+        voice_settings={},
+        total_items=len(page_ids),
+    )
+    session.add(job)
+    session.flush()
+    for page_id in page_ids:
+        session.add(JobItem(job_id=job.id, page_id=page_id, status=ItemStatus.DONE))
+    session.commit()
+    return job.id
+
+
+class TestAutoPublish:
+    """Publishing straight after a generation job, without anyone pressing a button."""
+
+    def enable(self, db: Session, on: bool = True) -> None:
+        set_value(db, "canvas_auto_publish", "1" if on else "0")
+        db.commit()
+
+    async def test_it_does_nothing_when_the_setting_is_off(
+        self, course: dict[str, Any], fake: FakeCanvas, db: Session
+    ) -> None:
+        job_id = build_job(db, course["page_ids"], course_id=course["course"].id)
+
+        result = await publish.publish_after_job(
+            job_id, transport=httpx.MockTransport(fake.handler)
+        )
+
+        assert result is None
+        assert fake.requests == [], "nothing at all was sent to Canvas"
+
+    async def test_a_finished_module_is_published(
+        self, course: dict[str, Any], fake: FakeCanvas, db: Session
+    ) -> None:
+        self.enable(db)
+        job_id = build_job(db, course["page_ids"], course_id=course["course"].id)
+
+        message = await publish.publish_after_job(
+            job_id, transport=httpx.MockTransport(fake.handler)
+        )
+
+        assert "3 publisert" in message
+        assert len(fake.files) == 3
+        for url in course["urls"]:
+            assert has_player(fake.pages[url])
+        with session_scope() as session:
+            record = publish.last_publish(session)
+        assert record["ok"] is True
+        assert record["job_id"] == job_id
+        assert record["modules"] == ["Modul 1 – Introduksjon"]
+        assert re.fullmatch(r"\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}", record["at_label"])
+
+    async def test_a_half_generated_module_is_left_alone(
+        self, course: dict[str, Any], fake: FakeCanvas, db: Session, env: Path
+    ) -> None:
+        self.enable(db)
+        extra = make_page(db, course["course"], course["module"], "Side 4", position=4, text="Ny.")
+        db.commit()  # no audio for this one, so the module is not finished
+        job_id = build_job(db, [*course["page_ids"], extra.id], course_id=course["course"].id)
+
+        result = await publish.publish_after_job(
+            job_id, transport=httpx.MockTransport(fake.handler)
+        )
+
+        assert result is None
+        assert fake.requests == []
+
+    async def test_a_canvas_failure_is_recorded_instead_of_raised(
+        self, course: dict[str, Any], fake: FakeCanvas, db: Session
+    ) -> None:
+        self.enable(db)
+        fake.fail_put_for = frozenset(course["urls"])
+        job_id = build_job(db, course["page_ids"], course_id=course["course"].id)
+
+        message = await publish.publish_after_job(
+            job_id, transport=httpx.MockTransport(fake.handler)
+        )
+
+        assert "3 feilet" in message
+        with session_scope() as session:
+            assert publish.last_publish(session)["ok"] is False
+
+    async def test_an_unexpected_failure_is_recorded_instead_of_raised(
+        self, course: dict[str, Any], fake: FakeCanvas, db: Session, monkeypatch: Any
+    ) -> None:
+        """Whatever goes wrong here, the generation job it follows must survive it."""
+        self.enable(db)
+        job_id = build_job(db, course["page_ids"], course_id=course["course"].id)
+
+        def boom(*_args: Any, **_kwargs: Any) -> None:
+            raise RuntimeError("databasen forsvant")
+
+        monkeypatch.setattr(publish, "prepare", boom)
+
+        message = await publish.publish_after_job(
+            job_id, transport=httpx.MockTransport(fake.handler)
+        )
+
+        assert message == "Automatisk publisering til Canvas feilet: databasen forsvant"
+        assert fake.requests == []
+        with session_scope() as session:
+            assert publish.last_publish(session)["ok"] is False
+
+    async def test_a_publishing_already_in_progress_is_skipped(
+        self, course: dict[str, Any], fake: FakeCanvas, db: Session
+    ) -> None:
+        self.enable(db)
+        job_id = build_job(db, course["page_ids"], course_id=course["course"].id)
+        with session_scope() as session:
+            publish.new_run("publish", publish.prepare(session, "publish", None))
+
+        message = await publish.publish_after_job(
+            job_id, transport=httpx.MockTransport(fake.handler)
+        )
+
+        assert "pågikk allerede" in message
+        assert fake.requests == []
+        with session_scope() as session:
+            assert publish.last_publish(session)["ok"] is False
+
+    async def test_nothing_happens_without_canvas_credentials(
+        self, course: dict[str, Any], fake: FakeCanvas, db: Session, monkeypatch: Any
+    ) -> None:
+        from app import config
+
+        self.enable(db)
+        job_id = build_job(db, course["page_ids"], course_id=course["course"].id)
+        monkeypatch.delenv("CANVAS_TOKEN", raising=False)
+        config.reset_store(config.get_store().env_path)
+
+        result = await publish.publish_after_job(
+            job_id, transport=httpx.MockTransport(fake.handler)
+        )
+
+        assert result is None
+        assert fake.requests == []
+
+    async def test_publishing_twice_does_not_change_the_pages_again(
+        self, course: dict[str, Any], fake: FakeCanvas, db: Session
+    ) -> None:
+        self.enable(db)
+        job_id = build_job(db, course["page_ids"], course_id=course["course"].id)
+        await publish.publish_after_job(job_id, transport=httpx.MockTransport(fake.handler))
+        bodies = dict(fake.pages)
+        fake.requests.clear()
+
+        message = await publish.publish_after_job(
+            job_id, transport=httpx.MockTransport(fake.handler)
+        )
+
+        assert "3 uendret" in message
+        assert fake.pages == bodies
+        assert not any(method in ("POST", "PUT") for method, _ in fake.requests)

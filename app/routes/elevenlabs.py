@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Response
 
 from app.config import get_settings
 from app.schemas.common import TestResult
 from app.security import require_auth
-from app.services.elevenlabs_service import ElevenLabsClient, check_elevenlabs_connection
+from app.services.elevenlabs_service import (
+    ElevenLabsClient,
+    check_elevenlabs_connection,
+    fetch_preview,
+)
 
 router = APIRouter(
     prefix="/api/elevenlabs", tags=["elevenlabs"], dependencies=[Depends(require_auth)]
@@ -30,6 +34,26 @@ async def list_voices() -> list[dict[str, object]]:
         }
         for v in voices
     ]
+
+
+@router.get("/voices/{voice_id}/preview")
+async def voice_preview(voice_id: str) -> Response:
+    """Play a voice sample without the browser ever talking to ElevenLabs."""
+    settings = get_settings()
+    async with ElevenLabsClient(settings.elevenlabs_api_key) as client:
+        voices = await client.list_voices()
+    voice = next((v for v in voices if v.voice_id == voice_id), None)
+    if voice is None:
+        raise HTTPException(status_code=404, detail="Fant ikke stemmen.")
+    if not voice.preview_url:
+        raise HTTPException(status_code=404, detail="Denne stemmen har ingen lydprøve.")
+    audio = await fetch_preview(voice.preview_url)
+    return Response(
+        content=audio,
+        media_type="audio/mpeg",
+        # Already compressed, and gzip would break the player's range requests.
+        headers={"Content-Encoding": "identity"},
+    )
 
 
 @router.get("/models")

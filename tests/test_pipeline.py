@@ -9,12 +9,14 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import session_scope
+from app.jobs import pipeline
 from app.jobs.pipeline import run_job
 from app.models.core import (
     AIProvider,
@@ -37,9 +39,10 @@ MP3_BYTES = b"ID3\x03\x00\x00\x00\x00\x00\x00fake-mp3-payload"
 class FakeElevenLabs:
     """Records what it was asked to synthesise and returns fixed bytes."""
 
-    def __init__(self, *, fail_on: set[str] | None = None) -> None:
+    def __init__(self, *, fail_on: set[str] | None = None, parts: int = 1) -> None:
         self.calls: list[dict[str, Any]] = []
         self.fail_on = fail_on or set()
+        self.parts = parts  # pretend the page was too long and read in several takes
 
     async def synthesize(
         self,
@@ -48,6 +51,7 @@ class FakeElevenLabs:
         voice_id: str,
         model_id: str,
         voice_settings: dict[str, Any] | None = None,
+        progress: Any = None,
     ) -> SynthesisResult:
         from app.services.errors import UpstreamError
         from app.services.text_service import ensure_plain_text
@@ -58,8 +62,15 @@ class FakeElevenLabs:
         )
         if text in self.fail_on:
             raise UpstreamError("ElevenLabs svarte 500", provider="elevenlabs")
+        if progress is not None:
+            for part in range(1, self.parts + 1):
+                await progress(part, self.parts)
         return SynthesisResult(
-            audio=MP3_BYTES, characters=len(text), voice_id=voice_id, model_id=model_id
+            audio=MP3_BYTES,
+            characters=len(text),
+            voice_id=voice_id,
+            model_id=model_id,
+            parts=self.parts,
         )
 
     async def aclose(self) -> None:
@@ -411,3 +422,106 @@ class TestAIPunctuation:
         second = FakeElevenLabs()
         await run_job(build_job(db, [page], **kwargs), tts_client=second)
         assert second.calls == []
+
+
+class TestLongPages:
+    """A page too long for one request is read in several takes."""
+
+    async def test_the_item_says_which_part_is_being_read(
+        self, env: Path, course_with_pages: dict[str, Any], db: Session
+    ) -> None:
+        seen: list[str] = []
+        page = course_with_pages["pages"][0]
+        job_id = build_job(db, [page])
+        fake = FakeElevenLabs(parts=4)
+        original = pipeline.set_item_status
+
+        def record(session: Session, item_id: int, status: ItemStatus, message: str = "") -> None:
+            if message:
+                seen.append(message)
+            original(session, item_id, status, message)
+
+        with patch.object(pipeline, "set_item_status", record):
+            await run_job(job_id, tts_client=fake)
+
+        assert [message for message in seen if message.startswith("Del ")] == [
+            "Del 1 av 4",
+            "Del 2 av 4",
+            "Del 3 av 4",
+            "Del 4 av 4",
+        ]
+
+    async def test_a_finished_page_says_how_many_takes_it_took(
+        self, env: Path, course_with_pages: dict[str, Any], db: Session
+    ) -> None:
+        page = course_with_pages["pages"][0]
+        await run_job(build_job(db, [page]), tts_client=FakeElevenLabs(parts=5))
+
+        with session_scope() as session:
+            item = session.execute(select(JobItem)).scalars().one()
+            assert item.status == ItemStatus.DONE
+            assert item.message == "Lest inn i 5 deler."
+
+    async def test_a_page_read_in_one_take_says_nothing_extra(
+        self, env: Path, course_with_pages: dict[str, Any], db: Session
+    ) -> None:
+        page = course_with_pages["pages"][0]
+        await run_job(build_job(db, [page]), tts_client=FakeElevenLabs())
+
+        with session_scope() as session:
+            item = session.execute(select(JobItem)).scalars().one()
+            assert item.message == ""
+
+    async def test_the_split_page_is_still_one_file_and_one_usage_record(
+        self, env: Path, course_with_pages: dict[str, Any], db: Session
+    ) -> None:
+        page = course_with_pages["pages"][0]
+        await run_job(build_job(db, [page]), tts_client=FakeElevenLabs(parts=5))
+
+        with session_scope() as session:
+            audio = session.execute(select(GeneratedAudio)).scalars().all()
+            assert len(audio) == 1
+            assert (env / "output" / audio[0].relative_path).read_bytes() == MP3_BYTES
+            usage = session.execute(select(UsageRecord)).scalars().all()
+            assert len(usage) == 1, "the page is billed once, not once per part"
+
+
+class TestFollowUpPublishing:
+    """The job hands over to the publishers, and never fails because of them."""
+
+    async def test_a_finished_job_offers_itself_to_both_publishers(
+        self, env: Path, course_with_pages: dict[str, Any], db: Session
+    ) -> None:
+        seen: dict[str, list[int]] = {"soundcloud": [], "canvas": []}
+
+        async def record(name: str, job_id: int) -> None:
+            seen[name].append(job_id)
+
+        job_id = build_job(db, course_with_pages["pages"])
+        with (
+            patch.object(
+                pipeline.soundcloud_publish,
+                "publish_after_job",
+                lambda job: record("soundcloud", job),
+            ),
+            patch.object(
+                pipeline.canvas_publish, "publish_after_job", lambda job: record("canvas", job)
+            ),
+        ):
+            await run_job(job_id, tts_client=FakeElevenLabs())
+
+        assert seen == {"soundcloud": [job_id], "canvas": [job_id]}
+
+    async def test_a_cancelled_job_publishes_nothing(
+        self, env: Path, course_with_pages: dict[str, Any], db: Session
+    ) -> None:
+        calls: list[int] = []
+
+        async def record(job: int) -> None:
+            calls.append(job)
+
+        job_id = build_job(db, course_with_pages["pages"])
+        with patch.object(pipeline.canvas_publish, "publish_after_job", record):
+            await run_job(job_id, tts_client=FakeElevenLabs(), is_cancelled=lambda: True)
+
+        assert calls == []

@@ -6,15 +6,22 @@ the GUI refuses to start a job until the user has picked both.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
 from app.logging_config import get_logger
-from app.services.errors import AuthenticationError, ConfigurationError, UpstreamError
+from app.services.audio_service import join_mp3
+from app.services.errors import (
+    AuthenticationError,
+    ConfigurationError,
+    ServiceError,
+    UpstreamError,
+)
 from app.services.http import build_client, raise_for_status, with_retries
-from app.services.text_service import ensure_plain_text
+from app.services.text_service import ensure_plain_text, split_for_tts
 
 logger = get_logger("app.services.elevenlabs")
 
@@ -22,12 +29,25 @@ PROVIDER = "elevenlabs"
 BASE_URL = "https://api.elevenlabs.io"
 DEFAULT_OUTPUT_FORMAT = "mp3_44100_128"
 
+#: 400, 413 and 422 are deliberately absent: those are the answers a rejected text
+#: gets, and ElevenLabs' own explanation is more useful than anything canned. The
+#: length of the part that was rejected is added to it in :func:`_length_hint`.
 ERROR_MESSAGES = {
     401: "ElevenLabs avviste API-nøkkelen (401).",
     402: "ElevenLabs-kvoten er brukt opp (402). Fyll på abonnementet for å fortsette.",
-    422: "ElevenLabs avviste forespørselen (422). Sjekk valgt voice og modell.",
     429: "ElevenLabs begrenser antall forespørsler (429).",
 }
+
+#: How many characters to send per request when the model's own limit is unknown.
+#: Low on purpose: every current model accepts at least this much.
+FALLBACK_MAX_CHARACTERS = 4_000
+#: Leave room under the model's stated limit; it counts characters its own way.
+BUDGET_MARGIN = 0.95
+MIN_BUDGET = 500
+#: Neighbouring text sent along so the voice does not change tone at a seam.
+STITCH_CONTEXT = 500
+#: Statuses that mean "this text was not accepted", where the length matters.
+REJECTED_TEXT_CODES = (400, 413, 422)
 
 
 INVALID_KEY_MESSAGE = (
@@ -115,6 +135,21 @@ class SynthesisResult:
     characters: int
     voice_id: str
     model_id: str
+    #: How many requests the text needed. More than one means it was split.
+    parts: int = 1
+
+
+def _length_hint(exc: UpstreamError, *, chunk: str, part: int, parts: int) -> UpstreamError:
+    """Add what the app knows and the API does not say: how long the text was."""
+    if exc.status_code not in REJECTED_TEXT_CODES:
+        return exc
+    where = f"Del {part} av {parts}" if parts > 1 else "Teksten"
+    size = f"{len(chunk):,}".replace(",", " ")
+    return UpstreamError(
+        f"{exc.message} {where} var {size} tegn.",
+        provider=PROVIDER,
+        status_code=exc.status_code,
+    )
 
 
 class ElevenLabsClient:
@@ -133,6 +168,8 @@ class ElevenLabsClient:
             timeout=timeout or 180.0,  # synthesis of a long page takes a while
             transport=transport,
         )
+        #: model_id -> characters per request, read once and remembered.
+        self._limits: dict[str, int] | None = None
 
     async def __aenter__(self) -> ElevenLabsClient:
         return self
@@ -223,6 +260,22 @@ class ElevenLabsClient:
 
     # -- synthesis -------------------------------------------------------
 
+    async def budget_for(self, model_id: str) -> int:
+        """Characters per request for this model, straight from the API.
+
+        The limit differs a lot between models — 40 000 for flash and turbo, 10 000
+        for multilingual v2, a few thousand for v3 — so it is read rather than
+        guessed. If the list cannot be fetched, the conservative fallback is used.
+        """
+        if self._limits is None:
+            try:
+                self._limits = {m.model_id: m.max_characters for m in await self.list_models()}
+            except ServiceError as exc:
+                logger.warning("Could not read ElevenLabs model limits: %s", exc)
+                self._limits = {}
+        limit = self._limits.get(model_id) or FALLBACK_MAX_CHARACTERS
+        return max(MIN_BUDGET, int(limit * BUDGET_MARGIN))
+
     async def synthesize(
         self,
         text: str,
@@ -231,11 +284,15 @@ class ElevenLabsClient:
         model_id: str,
         voice_settings: dict[str, Any] | None = None,
         output_format: str = DEFAULT_OUTPUT_FORMAT,
+        progress: Callable[[int, int], Awaitable[None]] | None = None,
     ) -> SynthesisResult:
-        """Convert plain text to MP3 bytes.
+        """Convert plain text to MP3 bytes, in as many takes as the model needs.
 
         The text is validated first: HTML must never reach a paid endpoint that
-        bills per character.
+        bills per character. A page longer than the model's per-request limit is
+        split on sentence boundaries and the parts are joined back into one file.
+        That costs the same, since the price follows the characters, not the number
+        of requests.
         """
         if not voice_id:
             raise ConfigurationError("Ingen ElevenLabs-stemme er valgt.", provider=PROVIDER)
@@ -243,16 +300,71 @@ class ElevenLabsClient:
             raise ConfigurationError("Ingen ElevenLabs-modell er valgt.", provider=PROVIDER)
 
         clean = ensure_plain_text(text, context="teksten som skal leses opp")
-        body: dict[str, Any] = {"text": clean, "model_id": model_id}
-        if voice_settings:
-            body["voice_settings"] = voice_settings
+        # Short pages are the normal case, and they never need the model list.
+        budget = FALLBACK_MAX_CHARACTERS
+        if len(clean) > FALLBACK_MAX_CHARACTERS:
+            budget = await self.budget_for(model_id)
+        chunks = split_for_tts(clean, budget)
 
         logger.info(
-            "Sending %s characters to ElevenLabs voice=%s model=%s",
+            "Sending %s characters to ElevenLabs in %d part(s) voice=%s model=%s",
             f"{len(clean):,}".replace(",", " "),
+            len(chunks),
             voice_id,
             model_id,
         )
+
+        pieces: list[bytes] = []
+        for index, chunk in enumerate(chunks):
+            pieces.append(
+                await self._synthesize_part(
+                    chunk,
+                    voice_id=voice_id,
+                    model_id=model_id,
+                    voice_settings=voice_settings,
+                    output_format=output_format,
+                    previous_text=chunks[index - 1] if index else "",
+                    next_text=chunks[index + 1] if index + 1 < len(chunks) else "",
+                    part=index + 1,
+                    parts=len(chunks),
+                )
+            )
+            if progress is not None:
+                await progress(index + 1, len(chunks))
+
+        # Same voice, same format: the MP3 frames play as one file when joined.
+        audio = join_mp3(pieces)
+        logger.info("Audio generation completed parts=%d bytes=%d", len(chunks), len(audio))
+        return SynthesisResult(
+            audio=audio,
+            characters=len(clean),
+            voice_id=voice_id,
+            model_id=model_id,
+            parts=len(chunks),
+        )
+
+    async def _synthesize_part(
+        self,
+        chunk: str,
+        *,
+        voice_id: str,
+        model_id: str,
+        voice_settings: dict[str, Any] | None,
+        output_format: str,
+        previous_text: str,
+        next_text: str,
+        part: int,
+        parts: int,
+    ) -> bytes:
+        body: dict[str, Any] = {"text": chunk, "model_id": model_id}
+        if voice_settings:
+            body["voice_settings"] = voice_settings
+        # Request stitching: the model reads the neighbouring text for context, so
+        # the tone does not jump where one part ends and the next begins.
+        if previous_text:
+            body["previous_text"] = previous_text[-STITCH_CONTEXT:]
+        if next_text:
+            body["next_text"] = next_text[:STITCH_CONTEXT]
 
         async def _call() -> httpx.Response:
             response = await self._client.post(
@@ -265,17 +377,21 @@ class ElevenLabsClient:
             raise_for_status(response, provider=PROVIDER, messages=ERROR_MESSAGES)
             return response
 
-        response = await with_retries(
-            _call, provider=PROVIDER, description="ElevenLabs text-to-speech"
-        )
+        try:
+            response = await with_retries(
+                _call,
+                provider=PROVIDER,
+                description=f"ElevenLabs tekst til tale (del {part} av {parts})",
+            )
+        except UpstreamError as exc:
+            raise _length_hint(exc, chunk=chunk, part=part, parts=parts) from exc
+
         audio = response.content
         if not audio:
-            raise UpstreamError("ElevenLabs returnerte en tom lydfil.", provider=PROVIDER)
-
-        logger.info("Audio generation completed bytes=%d", len(audio))
-        return SynthesisResult(
-            audio=audio, characters=len(clean), voice_id=voice_id, model_id=model_id
-        )
+            raise UpstreamError(
+                f"ElevenLabs returnerte en tom lydfil (del {part} av {parts}).", provider=PROVIDER
+            )
+        return audio
 
 
 async def check_elevenlabs_connection(
@@ -310,3 +426,30 @@ async def check_elevenlabs_connection(
         "character_count": sub.character_count,
         "character_limit": sub.character_limit,
     }
+
+
+#: A voice sample is at most a few hundred kilobytes; anything larger is not one.
+MAX_PREVIEW_BYTES = 5_000_000
+
+
+async def fetch_preview(url: str, *, transport: httpx.AsyncBaseTransport | None = None) -> bytes:
+    """Download a voice sample from the URL ElevenLabs gave for that voice.
+
+    The sample lives on ElevenLabs' file storage, not on the API host, so this
+    deliberately uses a client without the API key: the key is for the API and
+    must not be sent anywhere else.
+    """
+    if not url.startswith("https://"):
+        raise UpstreamError("Lydprøven har en ugyldig adresse.", provider=PROVIDER)
+    async with build_client(timeout=30.0, transport=transport) as client:
+        response = await client.get(url)
+        if response.status_code != 200:
+            raise UpstreamError(
+                f"Kunne ikke hente lydprøven ({response.status_code}).",
+                provider=PROVIDER,
+                status_code=response.status_code,
+            )
+        audio = response.content
+    if len(audio) > MAX_PREVIEW_BYTES:
+        raise UpstreamError("Lydprøven var uventet stor.", provider=PROVIDER)
+    return audio

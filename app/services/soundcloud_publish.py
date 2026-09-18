@@ -39,8 +39,8 @@ from app.services import soundcloud_service
 from app.services.app_settings import get_value, load_preferences, set_value
 from app.services.audio_service import resolve_path
 from app.services.errors import NotFoundError, ServiceError, UpstreamError
-from app.services.hashing import audio_is_current
 from app.services.presenters import selected_course
+from app.services.selection import complete_module_ids
 from app.services.soundcloud_service import PlaylistInfo, SoundCloudClient, UploadedTrack
 
 logger = get_logger("app.services.soundcloud_publish")
@@ -513,21 +513,6 @@ def link_playlist(session: Session, module_id: int, info: PlaylistInfo | None) -
 # --------------------------------------------------------------------------- #
 # Publishing
 # --------------------------------------------------------------------------- #
-
-
-def complete_module_ids(session: Session, module_ids: list[int]) -> list[int]:
-    """Modules where every page with text has up-to-date audio."""
-    if not module_ids:
-        return []
-    complete: list[int] = []
-    modules = session.execute(
-        select(Module).where(Module.id.in_(module_ids)).order_by(Module.position)
-    ).scalars()
-    for module in modules:
-        spoken = [p for p in module.pages if not p.archived and p.tts_text.strip()]
-        if spoken and all(audio_is_current(p) for p in spoken):
-            complete.append(module.id)
-    return complete
 
 
 async def publish_modules(

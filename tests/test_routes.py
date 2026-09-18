@@ -5,11 +5,15 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.core import GenerationJob, JobStatus, Page
+from app.database import session_scope
+from app.models.core import Course, GenerationJob, JobItem, JobStatus, Page
 from app.services.app_settings import set_many
+from app.services.selection import resolve_pages
 
 
 class TestHealth:
@@ -438,6 +442,189 @@ class TestSoundCloudApi:
         assert "SoundCloud" in response.json()["detail"]
 
 
+class TestCanvasList:
+    """Search, filter and the on-demand rows behind the Canvas view."""
+
+    def test_search_finds_pages_across_modules(
+        self, client: TestClient, seeded: dict[str, Any]
+    ) -> None:
+        response = client.get("/fragments/canvas-sider?sok=introduksjon")
+
+        assert response.status_code == 200
+        assert "Introduksjon" in response.text
+        assert "Oppsummering" not in response.text
+        # Two pages in «Modul 1 – Introduksjon» plus the page called «Introduksjon».
+        assert "3 treff" in response.text
+
+    def test_the_status_filter_agrees_with_the_generation_modes(
+        self, client: TestClient, seeded: dict[str, Any]
+    ) -> None:
+        """What the filter shows must be what «Velg manglende» would generate."""
+        response = client.get("/fragments/canvas-sider?status=ikke_generert")
+
+        assert response.status_code == 200
+        with session_scope() as session:
+            expected = resolve_pages(session, mode="missing")
+            assert len(expected) == 3
+            for page in expected:
+                assert f'value="{page.id}"' in response.text
+            assert f'value="{seeded["pages"][0].id}"' not in response.text
+
+    def test_the_full_page_shows_the_same_search(
+        self, client: TestClient, seeded: dict[str, Any]
+    ) -> None:
+        """A shared or reloaded link must not come back as the whole course."""
+        page = client.get("/canvas?sok=oppsummering").text
+
+        assert "Oppsummering" in page
+        assert "1 treff" in page
+        assert "Velkommen" not in page
+
+    def test_an_unknown_filter_falls_back_to_everything(
+        self, client: TestClient, seeded: dict[str, Any]
+    ) -> None:
+        response = client.get("/fragments/canvas-sider?status=tullball&sok=e")
+        assert response.status_code == 200
+        assert "4 treff" in response.text
+
+    def test_html_is_compressed_but_audio_is_not(
+        self, client: TestClient, seeded: dict[str, Any]
+    ) -> None:
+        page = client.get("/canvas", headers={"Accept-Encoding": "gzip"})
+        assert page.headers.get("content-encoding") == "gzip"
+
+        audio = client.get(
+            f"/api/audio/{seeded['pages'][0].id}", headers={"Accept-Encoding": "gzip"}
+        )
+        assert audio.headers.get("content-encoding") != "gzip", "gzip breaks range requests"
+
+
+class TestGenerationTable:
+    """The table is polled every three seconds, so it may not be the whole course."""
+
+    def many_pages(self, count: int = 120) -> None:
+        from tests.conftest import make_course, make_module, make_page
+
+        with session_scope() as session:
+            course = session.scalar(select(Course).where(Course.is_selected.is_(True)))
+            if course is None:
+                course = make_course(session)
+            module = make_module(session, course, "Stor modul", 9)
+            for i in range(count):
+                make_page(session, course, module, f"Side nummer {i:03d}", position=i)
+            session.commit()
+
+    def test_only_one_page_of_rows_is_rendered(
+        self, client: TestClient, seeded: dict[str, Any]
+    ) -> None:
+        self.many_pages()
+
+        response = client.get("/generering")
+
+        assert response.text.count('<tr role="row">') == 50
+        assert "Side 1 av 3" in response.text
+        assert "/generering?side=2" in response.text
+
+    def test_the_next_page_shows_the_next_rows(
+        self, client: TestClient, seeded: dict[str, Any]
+    ) -> None:
+        self.many_pages()
+        first = client.get("/generering").text
+        second = client.get("/generering?side=2").text
+
+        assert "Side 2 av 3" in second
+        assert "Side nummer 000" in first
+        assert "Side nummer 000" not in second
+        assert "Side nummer 050" in second
+
+    def test_a_page_beyond_the_end_shows_the_last_one(
+        self, client: TestClient, seeded: dict[str, Any]
+    ) -> None:
+        self.many_pages()
+        response = client.get("/generering?side=99")
+        assert "Side 3 av 3" in response.text
+
+    def test_the_poll_keeps_the_page_you_are_looking_at(
+        self, client: TestClient, seeded: dict[str, Any], recorded_jobs: list[int]
+    ) -> None:
+        self.many_pages()
+        with session_scope() as session:
+            course = session.scalar(select(Course).where(Course.is_selected.is_(True)))
+            job = GenerationJob(
+                course_id=course.id,
+                status=JobStatus.RUNNING,
+                voice_id="v1",
+                voice_name="Testrøst",
+                tts_model="m",
+                voice_settings={},
+                total_items=0,
+            )
+            session.add(job)
+            session.flush()
+            pages = session.scalars(
+                select(Page).where(Page.course_id == course.id).order_by(Page.id)
+            ).all()
+            for page in pages:
+                session.add(JobItem(job_id=job.id, page_id=page.id, status="pending"))
+            job.total_items = len(pages)
+            session.commit()
+            job_id = job.id
+
+        fragment = client.get(f"/fragments/generation-rows?jobb={job_id}&side=2")
+
+        assert fragment.status_code == 200
+        assert "Side 2 av" in fragment.text
+        # The attribute is escaped HTML, so the ampersand comes back as &amp;.
+        assert f"/fragments/generation-rows?jobb={job_id}&amp;side=2" in fragment.text
+
+
+class TestVoicePreview:
+    """The sample is proxied, so the browser never calls ElevenLabs itself."""
+
+    def patch_voices(self, monkeypatch: pytest.MonkeyPatch, preview: str) -> list[str]:
+        from app.routes import elevenlabs as routes
+        from app.services.elevenlabs_service import ElevenLabsClient, Voice
+
+        fetched: list[str] = []
+
+        async def voices(self: Any) -> list[Voice]:
+            return [Voice(voice_id="v1", name="Nora", preview_url=preview)]
+
+        async def fetch(url: str, **_kwargs: Any) -> bytes:
+            fetched.append(url)
+            return b"ID3sample"
+
+        monkeypatch.setattr(ElevenLabsClient, "list_voices", voices)
+        monkeypatch.setattr(routes, "fetch_preview", fetch)
+        return fetched
+
+    def test_the_sample_comes_back_as_audio(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fetched = self.patch_voices(monkeypatch, "https://files.example.test/nora.mp3")
+
+        response = client.get("/api/elevenlabs/voices/v1/preview")
+
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "audio/mpeg"
+        assert response.content == b"ID3sample"
+        assert fetched == ["https://files.example.test/nora.mp3"]
+
+    def test_a_voice_without_a_sample_is_a_404(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self.patch_voices(monkeypatch, "")
+        response = client.get("/api/elevenlabs/voices/v1/preview")
+        assert response.status_code == 404
+        assert "lydprøve" in response.json()["detail"]
+
+    def test_an_unknown_voice_is_a_404(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self.patch_voices(monkeypatch, "https://files.example.test/nora.mp3")
+        assert client.get("/api/elevenlabs/voices/finnes-ikke/preview").status_code == 404
+
+
 class TestGui:
     def test_dashboard_renders(self, client: TestClient, seeded: dict[str, Any]) -> None:
         response = client.get("/")
@@ -448,12 +635,22 @@ class TestGui:
         for emoji in ("📊", "🎓", "🎧", "☁️", "⚙️"):
             assert emoji in response.text
 
-    def test_canvas_view_lists_modules_and_pages(
+    def test_canvas_view_lists_the_modules(
         self, client: TestClient, seeded: dict[str, Any]
     ) -> None:
         response = client.get("/canvas")
         assert response.status_code == 200
         assert "Modul 1 – Introduksjon" in response.text
+        # The pages themselves are fetched when the module is opened.
+        assert 'class="page-check"' not in response.text
+        assert "/fragments/canvas-sider?modul=" in response.text
+
+    def test_opening_a_module_fetches_its_pages(
+        self, client: TestClient, seeded: dict[str, Any]
+    ) -> None:
+        module = seeded["modules"][0]
+        response = client.get(f"/fragments/canvas-sider?modul={module.id}")
+        assert response.status_code == 200
         assert "Velkommen" in response.text
         assert "Oppdatert" in response.text
 

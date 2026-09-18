@@ -1,0 +1,19 @@
+{% for page in rows %}
+<div class="page-row">
+  <input type="checkbox" class="page-check" id="page-{{ page.id }}" value="{{ page.id }}"
+         data-status="{{ page.status }}" data-module="{{ page.module_id }}"
+         data-characters="{{ page.characters }}"
+         aria-labelledby="page-title-{{ page.id }}" onchange="onPagePicked(this)">
+  <span class="page-row-title">
+    <a href="/side/{{ page.id }}" id="page-title-{{ page.id }}">{{ page.title }}</a>
+    <div class="page-row-meta">
+      {% if searching %}{{ page.module_name }} · {% endif %}
+      {{ "{:,}".format(page.characters).replace(",", " ") }} tegn ·
+      {{ "{:,}".format(page.words).replace(",", " ") }} ord
+    </div>
+  </span>
+  <span class="badge {{ status_badge(page.status) }}">{{ status_icon(page.status) }} {{ page.status_label }}</span>
+</div>
+{% else %}
+<div class="page-row dim">Ingen sider her.</div>
+{% endfor %}

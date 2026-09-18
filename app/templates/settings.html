@@ -155,6 +155,69 @@
   </div>
 </section>
 
+<section class="section">
+  <div class="card">
+    <div class="card-header">
+      <h2>🗣️ Uttale</h2>
+      <span class="spacer badge badge-muted" id="rule-count">{{ rules|length }} oppslag</span>
+    </div>
+    <p class="field-hint" style="margin-top: 0;">
+      Talemotoren bommer på forkortelser og egennavn. Her skriver du om teksten før den leses
+      opp — «HiØ» blir «Høgskolen i Østfold», «jf.» blir «jamfør». Erstatningene gjøres når
+      teksten renses, så du ser dem i teksten på sidevisningen, og sidene som faktisk endres blir
+      merket som endret slik at du kan generere dem på nytt.
+    </p>
+
+    <div class="table-wrap" style="margin-top: var(--space-4);">
+      <table>
+        <thead>
+          <tr>
+            <th>Skrevet i Canvas</th>
+            <th>Leses som</th>
+            <th class="right">Hele ord</th>
+            <th class="right">Store/små</th>
+            <th class="right">På</th>
+            <th class="right">Fjern</th>
+          </tr>
+        </thead>
+        <tbody id="rule-rows">
+          {% for rule in rules %}
+          <tr class="rule-row">
+            <td><input type="text" class="rule-pattern" value="{{ rule.pattern }}" maxlength="200"
+                       aria-label="Skrevet i Canvas"></td>
+            <td><input type="text" class="rule-replacement" value="{{ rule.replacement }}" maxlength="400"
+                       aria-label="Leses som"></td>
+            <td class="right"><input type="checkbox" class="rule-word" {{ "checked" if rule.whole_word }}
+                       aria-label="Bare hele ord"></td>
+            <td class="right"><input type="checkbox" class="rule-case" {{ "checked" if rule.match_case }}
+                       aria-label="Skill mellom store og små bokstaver"></td>
+            <td class="right"><input type="checkbox" class="rule-enabled" {{ "checked" if rule.enabled }}
+                       aria-label="Bruk dette oppslaget"></td>
+            <td class="right"><button type="button" class="btn btn-ghost btn-sm"
+                       onclick="removeRule(this)" aria-label="Fjern oppslaget «{{ rule.pattern }}»">✕</button></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="btn-row" style="margin-top: var(--space-4);">
+      <button class="btn btn-ghost btn-sm" onclick="addRule()">+ Nytt oppslag</button>
+      <button class="btn btn-primary btn-sm" onclick="saveRules(this)">💾 Lagre uttaleliste</button>
+    </div>
+
+    <div class="field" style="margin-top: var(--space-5);">
+      <label for="rule-sample">Prøv listen</label>
+      <textarea id="rule-sample" rows="3" style="min-height: 90px;"
+                placeholder="Lim inn litt tekst her for å se hvordan den blir lest."></textarea>
+      <div class="btn-row">
+        <button class="btn btn-ghost btn-sm" onclick="tryRules(this)">Vis resultatet</button>
+      </div>
+      <p class="field-hint" id="rule-result" role="status"></p>
+    </div>
+  </div>
+</section>
+
 <div class="btn-row" style="position: sticky; bottom: var(--space-4);">
   <button class="btn btn-primary" onclick="saveSettings(this)">💾 Lagre innstillinger</button>
 </div>
@@ -164,6 +227,55 @@
 <script>
   window.AI_MODELS = {{ ai_models_json|safe }};
   window.CURRENT_AI_MODEL = {{ prefs.ai_model|tojson }};
+
+  function ruleRows() {
+    return Array.from(document.querySelectorAll("#rule-rows .rule-row")).map(function (row) {
+      return {
+        pattern: row.querySelector(".rule-pattern").value.trim(),
+        replacement: row.querySelector(".rule-replacement").value.trim(),
+        whole_word: row.querySelector(".rule-word").checked,
+        match_case: row.querySelector(".rule-case").checked,
+        enabled: row.querySelector(".rule-enabled").checked,
+      };
+    }).filter(function (rule) { return rule.pattern; });
+  }
+
+  function addRule() {
+    const row = document.createElement("tr");
+    row.className = "rule-row";
+    row.innerHTML =
+      '<td><input type="text" class="rule-pattern" maxlength="200" aria-label="Skrevet i Canvas"></td>' +
+      '<td><input type="text" class="rule-replacement" maxlength="400" aria-label="Leses som"></td>' +
+      '<td class="right"><input type="checkbox" class="rule-word" checked aria-label="Bare hele ord"></td>' +
+      '<td class="right"><input type="checkbox" class="rule-case" aria-label="Skill mellom store og små bokstaver"></td>' +
+      '<td class="right"><input type="checkbox" class="rule-enabled" checked aria-label="Bruk dette oppslaget"></td>' +
+      '<td class="right"><button type="button" class="btn btn-ghost btn-sm" onclick="removeRule(this)" aria-label="Fjern oppslaget">✕</button></td>';
+    document.getElementById("rule-rows").appendChild(row);
+    row.querySelector(".rule-pattern").focus();
+  }
+
+  function removeRule(button) {
+    button.closest(".rule-row").remove();
+  }
+
+  async function saveRules(button) {
+    await withBusy(button, async function () {
+      const result = await api("/api/uttale", { method: "PUT", body: { rules: ruleRows() } });
+      if (!result.ok) return toast(errorMessage(result, "Kunne ikke lagre uttalelisten."), "error");
+      document.getElementById("rule-count").textContent = result.data.rules.length + " oppslag";
+      toast(result.data.message, "ok");
+    });
+  }
+
+  async function tryRules(button) {
+    const text = document.getElementById("rule-sample").value;
+    if (!text.trim()) return toast("Skriv litt tekst først.", "error");
+    await withBusy(button, async function () {
+      const result = await api("/api/uttale/prov", { method: "POST", body: { text: text } });
+      if (!result.ok) return toast(errorMessage(result, "Kunne ikke prøve listen."), "error");
+      document.getElementById("rule-result").textContent = result.data.text;
+    });
+  }
 
   // The voice name is not a field of its own; it follows the chosen voice.
   window.collectExtra = function () {

@@ -8,6 +8,7 @@ which pages *would* need regenerating, and they decide.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -19,6 +20,7 @@ from sqlalchemy.orm import Session
 from app.database import run_db
 from app.logging_config import get_logger
 from app.models.core import Course, Module, Page
+from app.services import pronunciation
 from app.services.canvas_service import (
     CanvasClient,
     CanvasModule,
@@ -196,13 +198,23 @@ def _upsert_structure(
     return course.id, needs_body, archived, new_pages
 
 
+def clean_page_text(session: Session, html: str) -> str:
+    """Canvas HTML → the text the app stores, shows, hashes and reads aloud.
+
+    The user's pronunciation list is applied here, and nowhere else: the stored
+    text is then the same text everywhere, so change detection, the estimate and
+    the speech engine can never disagree about what will be said.
+    """
+    return pronunciation.clean_text(session, html_to_text(html))
+
+
 def _store_body(session: Session, page_pk: int, body: CanvasPageBody) -> bool:
     """Persist a fetched page body. Returns True when the text actually changed."""
     page = session.get(Page, page_pk)
     if page is None:
         return False
 
-    text = html_to_text(body.body)
+    text = clean_page_text(session, body.body)
     new_hash = text_hash(text)
     changed = new_hash != page.original_hash
 
@@ -223,8 +235,14 @@ async def sync_course(
     token: str,
     canvas_course_id: str,
     transport: httpx.AsyncBaseTransport | None = None,
+    progress: Callable[..., None] | None = None,
 ) -> SyncResult:
-    """Fetch a whole course from Canvas and merge it into the database."""
+    """Fetch a whole course from Canvas and merge it into the database.
+
+    ``progress`` is called with keyword arguments as the work moves along, so a
+    long synchronisation can show how far it has come. It must never raise.
+    """
+    report = progress or (lambda **_kwargs: None)
     async with CanvasClient(base_url, token, transport=transport) as client:
         course = await client.get_course(canvas_course_id)
         modules = await client.list_modules(canvas_course_id)
@@ -253,8 +271,11 @@ async def sync_course(
 
         semaphore = asyncio.Semaphore(BODY_FETCH_CONCURRENCY)
         total = len(needs_body)
+        fetched = 0
+        report(phase="Henter sideinnhold", done=0, total=total, name=course.name)
 
         async def fetch_one(index: int, page_pk: int, page_url: str) -> None:
+            nonlocal fetched
             async with semaphore:
                 logger.info("Processing page %d/%d url=%s", index, total, page_url)
                 try:
@@ -264,10 +285,14 @@ async def sync_course(
                     result.errors.append(f"{page_url}: {detail}")
                     logger.warning("Failed to fetch page %s: %s", page_url, detail)
                     await run_db(lambda session: _record_page_error(session, page_pk, detail))
+                    fetched += 1
+                    report(done=fetched)
                     return
                 changed = await run_db(lambda session: _store_body(session, page_pk, body))
                 if changed:
                     result.changed_pages += 1
+                fetched += 1
+                report(done=fetched)
 
         await asyncio.gather(
             *(
@@ -277,6 +302,7 @@ async def sync_course(
         )
 
     # Pages that were not refetched still get the current cleaner applied.
+    report(phase="Rydder teksten")
     refetched = {page_pk for page_pk, _url, _updated in needs_body}
     result.changed_pages += await run_db(
         lambda session: _reclean_stored_pages(session, course_pk, refetched)
@@ -306,13 +332,22 @@ def _reclean_stored_pages(session: Session, course_pk: int, skip_ids: set[int]) 
     for page in pages:
         if page.id in skip_ids or not page.html:
             continue
-        text = html_to_text(page.html)
+        text = clean_page_text(session, page.html)
         if text != page.original_text:
             page.original_text = text
             page.original_hash = text_hash(text)
             changed += 1
     session.flush()
     return changed
+
+
+def reclean_course(session: Session, course_pk: int) -> int:
+    """Re-clean every stored page of a course, without calling Canvas.
+
+    Used after the pronunciation list changes: the pages it actually touches get
+    a new text and a new hash, so they show up as changed and can be regenerated.
+    """
+    return _reclean_stored_pages(session, course_pk, skip_ids=set())
 
 
 def refresh_page_body(session: Session, page: Page, body: CanvasPageBody) -> bool:

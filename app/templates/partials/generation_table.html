@@ -1,9 +1,27 @@
-{# Wrapper so htmx can swap the whole table (outerHTML) while a job is running. #}
-<div class="table-wrap" id="generation-table"
+{# Wrapper so htmx can swap the whole table (outerHTML) while a job is running.
+   The poll fetches only the page being looked at, not every row in the course. #}
+<div class="table-wrap is-scrollable" id="generation-table"
+     role="region" aria-label="Sider i jobben" tabindex="0"
      {% if job and job.status in ("queued", "running") %}
-     hx-get="/fragments/generation-rows{% if job %}?jobb={{ job.id }}{% endif %}"
+     hx-get="/fragments/generation-rows{{ table_query }}{{ side }}"
      hx-trigger="every 3s"
      hx-swap="outerHTML"
      {% endif %}>
   {% include "partials/generation_rows.html" %}
+
+  {% if last_side > 1 %}
+  <div class="table-pager">
+    <span class="dim">
+      Viser {{ ((side - 1) * 50) + 1 }}–{{ [side * 50, total_rows]|min }} av {{ nb(total_rows) }} sider
+    </span>
+    <span class="spacer"></span>
+    {% if side > 1 %}
+    <a class="btn btn-ghost btn-sm" href="/generering{{ table_query }}{{ side - 1 }}">← Forrige</a>
+    {% endif %}
+    <span class="dim">Side {{ side }} av {{ last_side }}</span>
+    {% if side < last_side %}
+    <a class="btn btn-ghost btn-sm" href="/generering{{ table_query }}{{ side + 1 }}">Neste →</a>
+    {% endif %}
+  </div>
+  {% endif %}
 </div>

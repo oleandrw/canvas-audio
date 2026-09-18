@@ -31,6 +31,7 @@ from app.schemas.canvas_player import (
 from app.schemas.common import OkResponse
 from app.security import require_auth
 from app.services import canvas_publish
+from app.services.app_settings import load_preferences
 from app.services.canvas_player import COLORS, ICONS, STYLES, PlayerDesign, player_html
 from app.services.hashing import audio_is_current
 from app.services.presenters import selected_course
@@ -160,5 +161,7 @@ def canvas_player_view(request: Request, session: Session = Depends(get_session)
             "preview_html": player_html(design, f"/api/audio/{sample['id']}" if sample else ""),
             "canvas_configured": bool(settings.canvas_url and settings.canvas_token),
             "run": run_out(run).model_dump(mode="json") if run else None,
+            "auto_publish": load_preferences(session).canvas_auto_publish,
+            "last_publish": canvas_publish.last_publish(session),
         },
     )

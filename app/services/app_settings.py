@@ -40,6 +40,7 @@ DEFAULTS: dict[str, str] = {
     "canvas_player_label": "Lytt til denne siden",
     "canvas_player_icon": "🎧",
     "canvas_audio_folder": "Lydfiler",
+    "canvas_auto_publish": "0",
 }
 
 #: Written by the app itself, never by the settings form. Deliberately outside
@@ -111,6 +112,7 @@ class Preferences:
     filename_style: str
     soundcloud_sharing: str
     soundcloud_auto_publish: bool = False
+    canvas_auto_publish: bool = False
 
     @property
     def tts_ready(self) -> bool:
@@ -141,6 +143,7 @@ def load_preferences(session: Session) -> Preferences:
         filename_style=filename_style if filename_style in VALID_FILENAME_STYLES else "slug",
         soundcloud_sharing=sharing if sharing in VALID_SHARING else "private",
         soundcloud_auto_publish=get_bool(session, "soundcloud_auto_publish"),
+        canvas_auto_publish=get_bool(session, "canvas_auto_publish"),
     )
 
 

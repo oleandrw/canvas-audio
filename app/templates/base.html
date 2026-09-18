@@ -6,22 +6,25 @@
   <meta name="color-scheme" content="dark">
   <title>{% block title %}Canvas → Lyd{% endblock %}</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🎧</text></svg>">
-  <link rel="stylesheet" href="{{ url_for('static', path='css/app.css') }}">
-  <script src="{{ url_for('static', path='vendor/htmx.min.js') }}" defer></script>
-  <script src="{{ url_for('static', path='js/app.js') }}" defer></script>
-  <script src="{{ url_for('static', path='js/player.js') }}" defer></script>
-  <script src="{{ url_for('static', path='js/settings.js') }}" defer></script>
+  <link rel="stylesheet" href="{{ url_for('static', path='css/app.css') }}?v={{ asset_version }}">
+  <script src="{{ url_for('static', path='vendor/htmx.min.js') }}?v={{ asset_version }}" defer></script>
+  <script src="{{ url_for('static', path='js/app.js') }}?v={{ asset_version }}" defer></script>
+  <script src="{{ url_for('static', path='js/player.js') }}?v={{ asset_version }}" defer></script>
+  <script src="{{ url_for('static', path='js/settings.js') }}?v={{ asset_version }}" defer></script>
 </head>
 <body>
+  <a class="skip-link" href="#main">Hopp til hovedinnhold</a>
   {% if show_nav %}
   <header class="topbar">
     <a class="brand" href="/">
       <span class="brand-mark">🎧</span>
       <span>Canvas&nbsp;→&nbsp;Lyd</span>
     </a>
-    <nav class="nav">
+    <nav class="nav" aria-label="Hovedmeny">
       {% for item in nav_items %}
-      <a href="{{ item.href }}" class="{{ 'active' if item.key == active_page else '' }}">
+      <a href="{{ item.href }}" class="{{ 'active' if item.key == active_page else '' }}"
+         aria-label="{{ item.label }}"
+         {% if item.key == active_page %}aria-current="page"{% endif %}>
         <span class="nav-emoji" aria-hidden="true">{{ item.emoji }}</span>
         <span>{{ item.label }}</span>
       </a>
@@ -37,7 +40,7 @@
   </header>
   {% endif %}
 
-  <main>
+  <main id="main" tabindex="-1">
     {% if restart_pending %}
     <div class="alert alert-warn">
       <span class="alert-icon">🔄</span>
@@ -50,7 +53,7 @@
     {% block content %}{% endblock %}
   </main>
 
-  <div class="toast-stack"></div>
+  <div class="toast-stack" role="status" aria-live="polite" aria-atomic="false"></div>
   {% block scripts %}{% endblock %}
 </body>
 </html>

@@ -96,6 +96,40 @@
   </div>
 </section>
 
+{% if course %}
+<section class="section">
+  <div class="card">
+    <div class="card-header"><h2>Automatisk publisering</h2></div>
+
+    <div class="inline-field">
+      <input type="checkbox" id="canvas_auto_publish" {{ "checked" if auto_publish }}
+             onchange="setAutoPublish(this)" {{ "disabled" if not canvas_configured }}>
+      <label for="canvas_auto_publish">Publiser automatisk når en hel modul er ferdig generert</label>
+    </div>
+    <p class="field-hint">
+      Når en genereringsjobb er ferdig og alle sidene med tekst i en modul har oppdatert lyd,
+      lastes lydfilene opp til Canvas og avspilleren legges øverst på sidene.
+      <strong>Dette endrer Canvas-sidene dine</strong> — Canvas beholder den forrige versjonen i
+      sidehistorikken. Moduler som ikke er ferdige, røres ikke, og publiseringen kan aldri
+      stoppe eller feile selve lydgenereringen.
+    </p>
+
+    {% if last_publish %}
+    <div class="alert {{ 'alert-ok' if last_publish.ok else 'alert-warn' }}" style="margin: var(--space-4) 0 0;">
+      <span class="alert-icon">{{ "✅" if last_publish.ok else "⚠️" }}</span>
+      <div>
+        <strong>Siste automatiske publisering</strong>
+        <span class="dim">
+          {{ last_publish.at_label }}{% if last_publish.modules %} · {{ last_publish.modules|join(", ") }}{% endif %}
+        </span><br>
+        {{ last_publish.message }}
+      </div>
+    </div>
+    {% endif %}
+  </div>
+</section>
+{% endif %}
+
 <section class="section" id="run-section" {{ "hidden" if not run }}>
   <div class="card">
     <div class="card-header">
@@ -190,6 +224,17 @@
     const box = document.createElement("div");
     box.textContent = value == null ? "" : String(value);
     return box.innerHTML;
+  }
+
+  async function setAutoPublish(box) {
+    const result = await api("/api/settings", { method: "POST", body: { canvas_auto_publish: box.checked } });
+    if (!result.ok) {
+      box.checked = !box.checked;
+      return toast(errorMessage(result, "Kunne ikke lagre."), "error");
+    }
+    toast(box.checked
+      ? "Ferdige moduler publiseres automatisk i Canvas."
+      : "Automatisk publisering er slått av.", "ok");
   }
 
   function currentDesign() {

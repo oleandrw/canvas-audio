@@ -44,6 +44,10 @@
         🔄 Synkroniser Canvas
       </button>
     </div>
+    <div id="sync-progress" hidden style="margin-top: var(--space-4);">
+      <div class="progress"><div class="progress-bar" id="sync-bar" style="width: 0%;"></div></div>
+      <p class="muted" id="sync-text" role="status" style="margin-top: var(--space-2);"></p>
+    </div>
   </div>
 </section>
 
@@ -71,10 +75,16 @@
       </div>
       <div class="field">
         <label for="voice-id">ElevenLabs-stemme</label>
-        <select id="voice-id">
-          <option value="">— ikke valgt —</option>
-          {% if prefs.voice_id %}<option value="{{ prefs.voice_id }}" selected>{{ prefs.voice_name or prefs.voice_id }}</option>{% endif %}
-        </select>
+        <div class="field-with-button">
+          <select id="voice-id">
+            <option value="">— ikke valgt —</option>
+            {% if prefs.voice_id %}<option value="{{ prefs.voice_id }}" selected>{{ prefs.voice_name or prefs.voice_id }}</option>{% endif %}
+          </select>
+          <button type="button" class="btn btn-ghost btn-sm" onclick="playVoiceSample(this)"
+                  aria-label="Hør stemmeprøve">
+            <span aria-hidden="true">▶</span> Hør
+          </button>
+        </div>
       </div>
       <div class="field">
         <label for="tts-model">ElevenLabs-modell</label>
@@ -82,6 +92,7 @@
           <option value="">— ikke valgt —</option>
           {% if prefs.tts_model_id %}<option value="{{ prefs.tts_model_id }}" selected>{{ prefs.tts_model_id }}</option>{% endif %}
         </select>
+        <p class="field-hint" id="model-limit"></p>
       </div>
     </div>
     <div class="btn-row">
@@ -97,57 +108,42 @@
     <span class="badge badge-muted">{{ stats.modules }} moduler · {{ stats.pages }} sider</span>
   </div>
 
-  <div class="btn-row" style="margin-bottom: var(--space-4);">
-    <button class="btn btn-ghost btn-sm" onclick="selectAll(true)">Velg alle</button>
-    <button class="btn btn-ghost btn-sm" onclick="selectAll(false)">Fjern alle</button>
-    <button class="btn btn-ghost btn-sm" onclick="selectByStatus(['not_generated'])">Velg manglende</button>
-    <button class="btn btn-ghost btn-sm" onclick="selectByStatus(['canvas_changed','text_changed'])">Velg endrede</button>
+  <div class="list-toolbar">
+    <input type="search" id="sok" name="sok" value="{{ search }}" maxlength="100"
+           placeholder="Søk i sidetitler og modulnavn …" aria-label="Søk i sider"
+           hx-get="/fragments/canvas-sider" hx-trigger="keyup changed delay:300ms, search"
+           hx-target="#canvas-results" hx-include="#status-filter">
+    <select id="status-filter" name="status" aria-label="Vis bare sider med status"
+            hx-get="/fragments/canvas-sider" hx-trigger="change"
+            hx-target="#canvas-results" hx-include="#sok">
+      {% for key, (label, _statuses) in filters.items() %}
+      <option value="{{ key }}" {{ "selected" if key == status }}>{{ label }}</option>
+      {% endfor %}
+    </select>
   </div>
 
-  {% for group in groups %}
-  {% set module_index = loop.index %}
-  <div class="module">
-    <div class="module-head">
-      <span class="chevron">▼</span>
-      <input type="checkbox" class="module-check" data-module="{{ module_index }}"
-             onclick="toggleModule(this)" aria-label="Velg hele modulen">
-      <span class="module-title">
-        {% if group.module %}{{ group.module.name }}{% else %}Uten modul{% endif %}
-      </span>
-      <span class="module-meta">
-        <span class="dim">{{ group.pages|length }} sider</span>
-        <span class="badge badge-muted">{{ group.ready }} klare</span>
-      </span>
-    </div>
-    <div class="module-body" data-module-body="{{ module_index }}">
-      {% for page in group.pages %}
-      <div class="page-row">
-        <input type="checkbox" class="page-check" value="{{ page.id }}"
-               data-status="{{ page.status }}" data-module="{{ module_index }}"
-               data-characters="{{ page.characters }}" onchange="refreshEstimate()">
-        <span class="page-row-title">
-          <a href="/side/{{ page.id }}">{{ page.title }}</a>
-          <div class="page-row-meta">
-            {{ "{:,}".format(page.characters).replace(",", " ") }} tegn ·
-            {{ "{:,}".format(page.words).replace(",", " ") }} ord
-          </div>
-        </span>
-        <span class="badge {{ status_badge(page.status) }}">{{ status_icon(page.status) }} {{ page.status_label }}</span>
-      </div>
-      {% else %}
-      <div class="page-row dim">Ingen Canvas-sider i denne modulen.</div>
-      {% endfor %}
-    </div>
+  <div class="btn-row" style="margin-bottom: var(--space-4);">
+    <button class="btn btn-ghost btn-sm" onclick="pickMode('all', this)">Velg alle i emnet</button>
+    <button class="btn btn-ghost btn-sm" onclick="pickMode('missing', this)">Velg manglende</button>
+    <button class="btn btn-ghost btn-sm" onclick="pickMode('changed', this)">Velg endrede</button>
+    <button class="btn btn-ghost btn-sm" onclick="clearSelection(true)">Tøm valg</button>
+    <span class="spacer badge badge-muted" id="selection-chip">Ingen sider valgt</span>
   </div>
-  {% endfor %}
+
+  <div id="canvas-results">
+    {% if searching %}
+    {% include "partials/canvas_results.html" %}
+    {% else %}
+    {% include "partials/canvas_modules.html" %}
+    {% endif %}
+  </div>
 
   {% if archived %}
   <div class="alert alert-info" style="margin-top: var(--space-4);">
     <span class="alert-icon">🗄️</span>
     <div>
-      <strong>{{ archived|length }} sider finnes ikke lenger i Canvas.</strong>
-      De er beholdt lokalt med lydfilene sine, men kan ikke velges:
-      {{ archived|map(attribute="title")|join(", ") }}
+      <strong>{{ archived }} sider finnes ikke lenger i Canvas.</strong>
+      De er beholdt lokalt med lydfilene sine, men kan ikke velges.
     </div>
   </div>
   {% endif %}
@@ -180,32 +176,123 @@
   const AI_MODELS = {{ ai_models_json|safe }};
   const CURRENT_AI_MODEL = {{ prefs.ai_model|tojson }};
 
-  function selectedIds() {
-    return Array.from(document.querySelectorAll(".page-check:checked")).map(function (el) {
-      return Number(el.value);
+  // Selection lives here, not in the DOM: the rows are loaded a module at a
+  // time, so the checkboxes on screen are never the whole truth.
+  const COURSE_KEY = "canvas-selection:" + {{ (course.id if course else 0)|tojson }};
+  const MODE_LABELS = {
+    all: "Alle sider i emnet",
+    missing: "Alle sider uten lyd",
+    changed: "Alle endrede sider",
+  };
+  let selectionMode = "selected";
+  let picked = loadSelection();
+
+  function loadSelection() {
+    try {
+      return new Set(JSON.parse(sessionStorage.getItem(COURSE_KEY) || "[]"));
+    } catch (err) {
+      return new Set();
+    }
+  }
+
+  function saveSelection() {
+    try {
+      sessionStorage.setItem(COURSE_KEY, JSON.stringify(Array.from(picked)));
+    } catch (err) {
+      /* a private window may refuse; the selection then lasts this page only */
+    }
+  }
+
+  function selectionPayload() {
+    return selectionMode === "selected"
+      ? { mode: "selected", page_ids: Array.from(picked) }
+      : { mode: selectionMode, page_ids: [] };
+  }
+
+  function hasSelection() {
+    return selectionMode !== "selected" || picked.size > 0;
+  }
+
+  function updateChip() {
+    const chip = document.getElementById("selection-chip");
+    if (!chip) return;
+    if (selectionMode !== "selected") {
+      chip.textContent = MODE_LABELS[selectionMode];
+      return;
+    }
+    chip.textContent = picked.size
+      ? picked.size + (picked.size === 1 ? " side valgt" : " sider valgt")
+      : "Ingen sider valgt";
+  }
+
+  function restoreChecks(root) {
+    (root || document).querySelectorAll(".page-check").forEach(function (box) {
+      box.checked = picked.has(Number(box.value));
+    });
+    refreshModuleChecks();
+  }
+
+  function refreshModuleChecks() {
+    document.querySelectorAll(".module-check").forEach(function (box) {
+      const rows = document.querySelectorAll('.page-check[data-module="' + box.dataset.module + '"]');
+      const checked = Array.from(rows).filter(function (el) { return el.checked; }).length;
+      box.checked = rows.length > 0 && checked === rows.length;
+      box.indeterminate = checked > 0 && checked < rows.length;
     });
   }
 
-  function selectAll(state) {
-    document.querySelectorAll(".page-check").forEach(function (el) { el.checked = state; });
-    document.querySelectorAll(".module-check").forEach(function (el) { el.checked = state; });
+  function onPagePicked(box) {
+    const id = Number(box.value);
+    if (box.checked) picked.add(id); else picked.delete(id);
+    selectionMode = "selected";
+    saveSelection();
+    updateChip();
+    refreshModuleChecks();
     refreshEstimate();
   }
 
-  function selectByStatus(statuses) {
-    document.querySelectorAll(".page-check").forEach(function (el) {
-      el.checked = statuses.indexOf(el.dataset.status) !== -1;
-    });
-    document.querySelectorAll(".module-check").forEach(function (el) { el.checked = false; });
+  function pickMode(mode, button) {
+    selectionMode = mode;
+    picked.clear();
+    saveSelection();
+    document.querySelectorAll(".page-check").forEach(function (el) { el.checked = false; });
+    refreshModuleChecks();
+    updateChip();
     refreshEstimate();
+  }
+
+  function clearSelection(refresh) {
+    selectionMode = "selected";
+    picked.clear();
+    saveSelection();
+    document.querySelectorAll(".page-check").forEach(function (el) { el.checked = false; });
+    refreshModuleChecks();
+    updateChip();
+    if (refresh) refreshEstimate();
   }
 
   function toggleModule(box) {
-    const id = box.dataset.module;
     document
-      .querySelectorAll('.page-check[data-module="' + id + '"]')
-      .forEach(function (el) { el.checked = box.checked; });
+      .querySelectorAll('.page-check[data-module="' + box.dataset.module + '"]')
+      .forEach(function (el) {
+        el.checked = box.checked;
+        const id = Number(el.value);
+        if (box.checked) picked.add(id); else picked.delete(id);
+      });
+    selectionMode = "selected";
+    saveSelection();
+    updateChip();
+    refreshModuleChecks();
     refreshEstimate();
+  }
+
+  function toggleModuleBody(button) {
+    const module = button.closest(".module");
+    const open = module.classList.toggle("collapsed") === false;
+    button.setAttribute("aria-expanded", open ? "true" : "false");
+    // The rows are fetched the first time the module is opened, and never again:
+    // htmx drops the trigger after the first one ("once").
+    if (open) htmx.trigger(module.querySelector(".module-body"), "apne-modul");
   }
 
   function onProviderChange() {
@@ -246,15 +333,37 @@
     });
   }
 
+  // Synchronising a few hundred pages takes minutes, so the button is not left
+  // spinning on its own: the server is asked once a second how far it has come.
+  async function pollSync() {
+    const box = document.getElementById("sync-progress");
+    const result = await api("/api/canvas/sync/status");
+    if (!result.ok || !result.data.running) return;
+    box.hidden = false;
+    document.getElementById("sync-bar").style.width = result.data.percent + "%";
+    const counted = result.data.total
+      ? " · side " + result.data.done + " av " + result.data.total
+      : "";
+    document.getElementById("sync-text").textContent =
+      (result.data.course_name ? result.data.course_name + " — " : "") +
+      result.data.phase + counted;
+  }
+
   async function syncCourse(button) {
     const courseId = document.getElementById("course-id").value.trim()
       || document.getElementById("course-select").value;
     if (!courseId) return toast("Velg et emne eller skriv inn en emne-ID.", "error");
+    const timer = setInterval(pollSync, 1000);
     await withBusy(button, async function () {
-      const result = await api("/api/canvas/sync", { method: "POST", body: { course_id: courseId } });
-      if (!result.ok) return toast(errorMessage(result, "Synkronisering feilet."), "error");
-      toast(result.data.message, "ok");
-      setTimeout(function () { location.reload(); }, 900);
+      try {
+        const result = await api("/api/canvas/sync", { method: "POST", body: { course_id: courseId } });
+        if (!result.ok) return toast(errorMessage(result, "Synkronisering feilet."), "error");
+        toast(result.data.message, "ok");
+        setTimeout(function () { location.reload(); }, 900);
+      } finally {
+        clearInterval(timer);
+        document.getElementById("sync-progress").hidden = true;
+      }
     });
   }
 
@@ -285,12 +394,43 @@
         const option = document.createElement("option");
         option.value = m.model_id;
         option.textContent = m.name;
+        option.dataset.limit = m.max_characters || 0;
         if (m.model_id === currentModel) option.selected = true;
         modelSelect.appendChild(option);
       });
-      modelSelect.onchange = refreshEstimate;
+      modelSelect.onchange = function () { showModelLimit(); refreshEstimate(); };
+      showModelLimit();
       toast("Hentet " + voices.data.length + " stemmer og " + models.data.length + " modeller.", "ok");
       refreshEstimate();
+    });
+  }
+
+  function showModelLimit() {
+    const select = document.getElementById("tts-model");
+    const hint = document.getElementById("model-limit");
+    const option = select.options[select.selectedIndex];
+    const limit = option && Number(option.dataset.limit || 0);
+    hint.textContent = limit
+      ? "Tar " + fmt.number(limit) + " tegn per forespørsel. Lengre sider deles automatisk, til samme pris."
+      : "";
+  }
+
+  let sample = null;
+
+  async function playVoiceSample(button) {
+    const voiceId = document.getElementById("voice-id").value;
+    if (!voiceId) return toast("Velg en stemme først.", "error");
+    if (sample) sample.pause();
+    sample = new Audio("/api/elevenlabs/voices/" + encodeURIComponent(voiceId) + "/preview");
+    sample.onerror = function () {
+      toast("Denne stemmen har ingen lydprøve.", "error");
+    };
+    await withBusy(button, async function () {
+      try {
+        await sample.play();
+      } catch (err) {
+        toast("Kunne ikke spille av lydprøven.", "error");
+      }
     });
   }
 
@@ -319,13 +459,12 @@
   }
 
   async function doRefreshEstimate() {
-    const ids = selectedIds();
     const generateBtn = document.getElementById("generate-btn");
     const regenBtn = document.getElementById("regen-btn");
     const body = document.getElementById("estimate-body");
     if (!body) return;
 
-    if (!ids.length) {
+    if (!hasSelection()) {
       body.innerHTML = '<p class="dim">Velg sider for å se estimatet.</p>';
       if (generateBtn) generateBtn.disabled = true;
       if (regenBtn) regenBtn.disabled = true;
@@ -335,8 +474,7 @@
     const result = await api("/fragments/estimate", {
       method: "POST",
       body: {
-        page_ids: ids,
-        mode: "selected",
+        ...selectionPayload(),
         ai_provider: document.getElementById("ai-provider").value,
         ai_model: document.getElementById("ai-model").value,
         tts_model: document.getElementById("tts-model").value,
@@ -354,12 +492,10 @@
   }
 
   async function startGeneration(button, force) {
-    const ids = selectedIds();
-    if (!ids.length) return toast("Ingen sider er valgt.", "error");
+    if (!hasSelection()) return toast("Ingen sider er valgt.", "error");
 
     const payload = {
-      page_ids: ids,
-      mode: "selected",
+      ...selectionPayload(),
       ai_provider: document.getElementById("ai-provider").value,
       ai_model: document.getElementById("ai-model").value,
       voice_id: document.getElementById("voice-id").value,
@@ -388,8 +524,14 @@
     });
   }
 
+  document.body.addEventListener("htmx:afterSwap", function (event) {
+    restoreChecks(event.target);
+  });
+
   document.addEventListener("DOMContentLoaded", function () {
     onProviderChange();
+    restoreChecks(document);
+    updateChip();
     const ttsModel = document.getElementById("tts-model");
     if (ttsModel) ttsModel.onchange = refreshEstimate;
   });

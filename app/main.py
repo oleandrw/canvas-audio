@@ -14,6 +14,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from app import __version__
@@ -30,6 +31,7 @@ from app.routes import (
     generation,
     health,
     pages,
+    pronunciation,
     soundcloud,
     ui,
     update,
@@ -131,6 +133,9 @@ def create_app() -> FastAPI:
     # Signed session cookie: used for the optional app password and the
     # SoundCloud OAuth state/PKCE verifier. No CORS middleware — the GUI and the
     # API share an origin, so there is nothing to open up.
+    # Page lists are long and repetitive; gzip turns a few hundred kilobytes
+    # into a few tens. Added first so the session middleware stays outermost.
+    app.add_middleware(GZipMiddleware, minimum_size=1000)
     app.add_middleware(
         SessionMiddleware,
         secret_key=settings.secret_key,
@@ -156,6 +161,7 @@ def create_app() -> FastAPI:
     app.include_router(soundcloud.router)
     app.include_router(canvas_player.router)
     app.include_router(canvas_player.page_router)
+    app.include_router(pronunciation.router)
     app.include_router(update.router)
     app.include_router(update.page_router)
     app.include_router(settings_routes.router)

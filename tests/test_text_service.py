@@ -11,6 +11,7 @@ from app.services.text_service import (
     ensure_plain_text,
     ensure_sentence_endings,
     html_to_text,
+    split_for_tts,
     summarize_structure,
 )
 
@@ -241,3 +242,45 @@ class TestSentenceEndingHelpers:
     def test_is_idempotent(self) -> None:
         once = ensure_sentence_endings("• Linje en\nLinje to,\n\nSpørsmål?")
         assert ensure_sentence_endings(once) == once
+
+
+class TestSplittingForTts:
+    """A page longer than the model's limit is read in several takes."""
+
+    def test_short_text_is_left_whole(self) -> None:
+        assert split_for_tts("Kort tekst.", 100) == ["Kort tekst."]
+        assert split_for_tts("  ", 100) == []
+
+    def test_it_never_exceeds_the_budget(self) -> None:
+        text = "\n\n".join(f"Avsnitt {i} med litt tekst i seg." for i in range(40))
+        chunks = split_for_tts(text, 120)
+        assert len(chunks) > 1
+        assert all(len(chunk) <= 120 for chunk in chunks)
+
+    def test_it_cuts_between_sentences_not_inside_them(self) -> None:
+        text = "Første setning her. Andre setning her. Tredje setning her."
+        chunks = split_for_tts(text, 25)
+        assert chunks == ["Første setning her.", "Andre setning her.", "Tredje setning her."]
+
+    def test_it_fills_the_budget_before_it_cuts(self) -> None:
+        """Fewer requests is both cheaper and steadier in tone."""
+        text = "Første setning her. Andre setning her. Tredje setning her."
+        assert split_for_tts(text, 40) == [
+            "Første setning her. Andre setning her.",
+            "Tredje setning her.",
+        ]
+
+    def test_nothing_is_lost_and_the_order_is_kept(self) -> None:
+        text = "\n\n".join(f"Avsnitt {i}. Med to setninger." for i in range(25))
+        joined = " ".join(" ".join(chunk.split()) for chunk in split_for_tts(text, 90))
+        assert joined == " ".join(text.split())
+
+    def test_one_enormous_sentence_is_cut_on_a_space(self) -> None:
+        text = "ord " * 200  # no sentence end anywhere
+        chunks = split_for_tts(text.strip(), 50)
+        assert all(len(chunk) <= 50 for chunk in chunks)
+        assert " ".join(chunks).split() == text.split()
+
+    def test_a_single_word_longer_than_the_budget_is_still_split(self) -> None:
+        chunks = split_for_tts("a" * 120, 50)
+        assert [len(chunk) for chunk in chunks] == [50, 50, 20]

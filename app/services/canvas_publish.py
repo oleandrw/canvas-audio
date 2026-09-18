@@ -15,6 +15,7 @@ Removing takes the player off the pages and leaves the files in Canvas.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -28,8 +29,8 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import run_db
 from app.logging_config import get_logger
-from app.models.core import CanvasEmbed, Course, Module, Page
-from app.services.app_settings import get_value, set_value
+from app.models.core import CanvasEmbed, Course, GenerationJob, Module, Page
+from app.services.app_settings import get_value, load_preferences, set_value
 from app.services.audio_service import resolve_path
 from app.services.canvas_player import (
     PlayerDesign,
@@ -43,6 +44,7 @@ from app.services.canvas_service import CanvasClient, CanvasPageBody
 from app.services.errors import ConfigurationError, ServiceError
 from app.services.hashing import audio_is_current
 from app.services.presenters import selected_course
+from app.services.selection import complete_module_ids
 from app.services.sync_service import refresh_page_body
 
 logger = get_logger("app.services.canvas_publish")
@@ -499,3 +501,113 @@ def reset_runs() -> None:
     global _current, _task
     _current = None
     _task = None
+
+
+# --------------------------------------------------------------------------- #
+# Automatic publishing after a generation job
+# --------------------------------------------------------------------------- #
+
+LAST_PUBLISH_KEY = "canvas_last_publish"
+
+
+def record_last_publish(
+    session: Session, *, job_id: int, ok: bool, message: str, modules: list[str]
+) -> None:
+    record = {
+        "at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "job_id": job_id,
+        "ok": ok,
+        "message": message,
+        "modules": modules,
+    }
+    set_value(session, LAST_PUBLISH_KEY, json.dumps(record, ensure_ascii=False))
+
+
+def last_publish(session: Session) -> dict[str, Any] | None:
+    raw = get_value(session, LAST_PUBLISH_KEY)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    try:
+        data["at_label"] = datetime.fromisoformat(data["at"]).strftime("%d.%m.%Y %H:%M")
+    except (KeyError, TypeError, ValueError):
+        data["at_label"] = ""
+    return data
+
+
+def _auto_publish_modules(session: Session, job_id: int) -> list[int]:
+    if not load_preferences(session).canvas_auto_publish:
+        return []
+    job = session.get(GenerationJob, job_id)
+    if job is None:
+        return []
+    module_ids = {
+        item.page.module_id
+        for item in job.items
+        if item.page is not None and item.page.module_id is not None
+    }
+    return complete_module_ids(session, sorted(module_ids))
+
+
+def _module_names(session: Session, module_ids: list[int]) -> list[str]:
+    modules = session.execute(
+        select(Module).where(Module.id.in_(module_ids)).order_by(Module.position)
+    ).scalars()
+    return [module.name for module in modules]
+
+
+async def publish_after_job(
+    job_id: int, *, transport: httpx.AsyncBaseTransport | None = None
+) -> str | None:
+    """Put the player on the Canvas pages of the modules this job finished.
+
+    Never raises: a Canvas problem must not fail the generation job it follows.
+    Returns the summary message, or ``None`` when there was nothing to publish.
+    """
+    settings = get_settings()
+    if not (settings.canvas_url and settings.canvas_token):
+        return None
+    try:
+        module_ids = await run_db(lambda session: _auto_publish_modules(session, job_id))
+        if not module_ids:
+            return None
+        names = await run_db(lambda session: _module_names(session, module_ids))
+        logger.info("Auto-publishing modules %s to Canvas after job %s", module_ids, job_id)
+        plan = await run_db(lambda session: prepare(session, "publish", module_ids))
+        if not plan.tasks:
+            return None
+        try:
+            run = new_run("publish", plan)
+        except RuntimeError:
+            # Someone pressed "Publiser" in the GUI at the same moment.
+            message = "Automatisk publisering ble hoppet over: en publisering pågikk allerede."
+            await run_db(
+                lambda session: record_last_publish(
+                    session, job_id=job_id, ok=False, message=message, modules=names
+                )
+            )
+            return message
+        # Awaited, not launched: the next job in the queue must not start while
+        # this run still owns the Canvas client and the run state.
+        await execute(run, plan, transport=transport)
+        ok = not run.error and run.counts()["failed"] == 0
+        message = run.summary()
+    except Exception as exc:  # a Canvas problem must never fail the generation job
+        logger.exception("Automatic Canvas publishing failed after job %s", job_id)
+        ok, message, names = False, f"Automatisk publisering til Canvas feilet: {exc}", []
+
+    logger.info("Canvas auto-publish after job %s: %s", job_id, message)
+    try:
+        await run_db(
+            lambda session: record_last_publish(
+                session, job_id=job_id, ok=ok, message=message, modules=names
+            )
+        )
+    except Exception:  # pragma: no cover - the record is informational only
+        logger.exception("Could not store the Canvas publishing result")
+    return message

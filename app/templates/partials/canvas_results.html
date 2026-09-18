@@ -1,0 +1,11 @@
+<div class="module">
+  <div class="module-head">
+    <span class="module-title">{{ heading }}</span>
+    {% if capped %}
+    <span class="module-meta dim">Viser de {{ rows|length }} første — presiser søket for å se resten.</span>
+    {% endif %}
+  </div>
+  <div class="module-body">
+    {% include "partials/canvas_rows.html" %}
+  </div>
+</div>

@@ -1,5 +1,5 @@
 {# Polled table body: one row per page, with live text/audio/SoundCloud state. #}
-<table>
+<table class="table-stack" role="table">
   <thead>
     <tr>
       <th>Side</th>
@@ -13,10 +13,10 @@
   </thead>
   <tbody>
     {% for row in rows %}
-    <tr>
-      <td><a href="/side/{{ row.page.id }}">{{ row.page.title }}</a></td>
-      <td class="dim">{{ row.module_name }}</td>
-      <td>
+    <tr role="row">
+      <td data-label="Side"><a href="/side/{{ row.page.id }}">{{ row.page.title }}</a></td>
+      <td data-label="Modul" class="dim">{{ row.module_name }}</td>
+      <td data-label="Tekst">
         {% if row.page.manually_edited %}
         <span class="badge badge-brand">Redigert</span>
         {% elif row.page.processed_by != "none" %}
@@ -27,29 +27,30 @@
         <span class="badge badge-warn">Mangler tekst</span>
         {% endif %}
       </td>
-      <td>
+      <td data-label="Lyd">
         <span class="badge {{ status_badge(row.status) }}">{{ status_icon(row.status) }} {{ row.status_label }}</span>
         {% if row.item_status %}
         <span class="badge {{ item_badge(row.item_status) }}">{{ row.item_status_label }}</span>
         {% endif %}
         {% if row.message %}<div class="dim" style="font-size: 0.8rem;">{{ row.message }}</div>{% endif %}
       </td>
-      <td>
+      <td data-label="SoundCloud">
         {% if row.page.soundcloud_track %}
         <a href="{{ row.page.soundcloud_track.permalink_url or '#' }}" target="_blank" rel="noopener">Lastet opp ↗</a>
         {% else %}
         <span class="dim">—</span>
         {% endif %}
       </td>
-      <td class="dim nowrap">
+      <td class="dim nowrap" data-label="Sist oppdatert">
         {{ row.page.updated_at.strftime("%d.%m %H:%M") if row.page.updated_at else "—" }}
       </td>
-      <td class="right nowrap">
+      <td class="right nowrap" data-label="Handlinger">
         {% if row.status == "failed" or row.item_status == "failed" %}
         <button class="btn btn-ghost btn-sm" onclick="retryPage({{ row.page.id }}, this)">Prøv igjen</button>
         {% endif %}
         {% if row.page.audio %}
-        <a class="btn btn-ghost btn-sm" href="/api/audio/{{ row.page.id }}?download=1">⬇️</a>
+        <a class="btn btn-ghost btn-sm" href="/api/audio/{{ row.page.id }}?download=1"
+           aria-label="Last ned lydfilen for {{ row.page.title }}"><span aria-hidden="true">⬇️</span></a>
         {% endif %}
         <a class="btn btn-ghost btn-sm" href="/side/{{ row.page.id }}">Åpne</a>
       </td>

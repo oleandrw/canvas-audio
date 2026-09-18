@@ -1,0 +1,27 @@
+{% for module in modules %}
+<div class="module collapsed">
+  <div class="module-head">
+    <input type="checkbox" class="module-check" data-module="{{ module.id }}"
+           onclick="toggleModule(this)" aria-label="Velg alle sider i {{ module.name }}">
+    <button type="button" class="module-toggle" aria-expanded="false"
+            aria-controls="module-body-{{ module.id }}" onclick="toggleModuleBody(this)">
+      <span class="chevron" aria-hidden="true">▼</span>
+      <span class="module-title">{{ module.name }}</span>
+      <span class="module-meta">
+        <span class="dim">{{ module.pages }} sider</span>
+        <span class="badge badge-ok">{{ module.ready }} klare</span>
+        {% if module.missing %}<span class="badge badge-muted">{{ module.missing }} mangler</span>{% endif %}
+        {% if module.changed %}<span class="badge badge-warn">{{ module.changed }} endret</span>{% endif %}
+        {% if module.failed %}<span class="badge badge-error">{{ module.failed }} feilet</span>{% endif %}
+      </span>
+    </button>
+  </div>
+  <div class="module-body" id="module-body-{{ module.id }}" data-module-body="{{ module.id }}"
+       hx-get="/fragments/canvas-sider?modul={{ module.id }}"
+       hx-trigger="apne-modul once" hx-swap="innerHTML">
+    <div class="page-row dim">Laster sider …</div>
+  </div>
+</div>
+{% else %}
+<div class="page-row dim">Ingen moduler i dette emnet ennå.</div>
+{% endfor %}

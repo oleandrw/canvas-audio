@@ -57,23 +57,51 @@ def ai_result_is_reusable(page: Any, provider: str, model: str) -> bool:
     )
 
 
+def audio_status(
+    *,
+    has_audio: bool,
+    audio_text_hash: str,
+    audio_canvas_hash: str,
+    tts_text: str,
+    page_hash: str,
+    last_error: str,
+) -> str:
+    """The status rule itself, on plain values.
+
+    The page list needs this for hundreds of rows without loading whole pages,
+    and :func:`page_audio_status` needs it for one ORM object. They must never
+    disagree, so there is only one copy of the rule.
+    """
+    if not has_audio:
+        return PageAudioStatus.FAILED if last_error else PageAudioStatus.NOT_GENERATED
+    if audio_canvas_hash and audio_canvas_hash != page_hash:
+        return PageAudioStatus.CANVAS_CHANGED
+    if audio_text_hash != text_hash(tts_text):
+        return PageAudioStatus.TEXT_CHANGED
+    return PageAudioStatus.UP_TO_DATE
+
+
 def page_audio_status(page: Any) -> str:
     """Derive the badge shown next to a page in the GUI."""
     audio = getattr(page, "audio", None)
-    if audio is None:
-        return PageAudioStatus.FAILED if page.last_error else PageAudioStatus.NOT_GENERATED
-    if audio.source_canvas_hash and audio.source_canvas_hash != page.original_hash:
-        return PageAudioStatus.CANVAS_CHANGED
-    if audio.source_text_hash != text_hash(page.tts_text):
-        return PageAudioStatus.TEXT_CHANGED
-    return PageAudioStatus.UP_TO_DATE
+    return audio_status(
+        has_audio=audio is not None,
+        audio_text_hash=audio.source_text_hash if audio else "",
+        audio_canvas_hash=audio.source_canvas_hash if audio else "",
+        tts_text=page.tts_text,
+        page_hash=page.original_hash,
+        last_error=page.last_error,
+    )
 
 
 #: Norwegian labels and icons for the derived status, used by the templates.
 STATUS_LABELS: dict[str, tuple[str, str, str]] = {
     PageAudioStatus.UP_TO_DATE: ("✓", "Oppdatert", "ok"),
     PageAudioStatus.NOT_GENERATED: ("○", "Ikke generert", "muted"),
-    PageAudioStatus.CANVAS_CHANGED: ("⚠", "Canvas-siden er endret", "warn"),
+    # Covers both causes: the Canvas page changed, or the app now derives a
+    # different text from the same page (an improved cleaner, a new
+    # pronunciation rule). Either way the source text is not what it was.
+    PageAudioStatus.CANVAS_CHANGED: ("⚠", "Teksten fra Canvas er endret", "warn"),
     PageAudioStatus.TEXT_CHANGED: ("⚠", "Teksten er endret", "warn"),
     PageAudioStatus.FAILED: ("✕", "Feilet", "error"),
 }
